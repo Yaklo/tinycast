@@ -17,8 +17,10 @@ const loading = ref(true)
 const notFound = ref(false)
 const fetchError = ref('')
 
-/** 以 SSE 快照为准；快照里还没有（例如刚打开详情页）时用一次请求兜底。 */
-const room = computed<RoomView | null>(() => findRoom(username.value) ?? fallback.value)
+/** 以 SSE 快照为准；快照尚未到达时用一次请求兜底，快照到达后不再使用兜底数据。 */
+const room = computed<RoomView | null>(() =>
+  findRoom(username.value) ?? (roomsState.loaded ? null : fallback.value),
+)
 
 const { label: graceLabel, expired: graceExpired } = useCountdown(() => room.value?.graceUntil ?? 0)
 
@@ -132,6 +134,12 @@ watch(
         </aside>
       </div>
     </template>
+
+    <div v-else class="state-panel">
+      <h2>房间已释放</h2>
+      <p>断流超过保留时间后，房间与用户名已自动释放。请让主播重新推流，或回到首页看看其他房间。</p>
+      <RouterLink to="/" class="btn btn-primary">返回首页</RouterLink>
+    </div>
   </div>
 </template>
 

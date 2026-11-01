@@ -157,7 +157,8 @@ function manualRetry(): void {
   void start()
 }
 
-watch(() => [props.room.username, props.room.state] as const, () => void start(), { immediate: true })
+/** 只在身份或状态真正变化时重连；观看人数等字段变化不应重建连接。 */
+watch(() => props.room.username + ':' + props.room.state, () => void start(), { immediate: true })
 
 onBeforeUnmount(() => {
   attempt += 1
