@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -379,6 +380,43 @@ func TestWatchValidatesViewerID(t *testing.T) {
 	}
 }
 
+// syncRecorder 让测试在 handler 仍在写响应时也能安全读取已写内容。
+// httptest.ResponseRecorder 不是并发安全的，SSE 的轮询读取必须加锁。
+type syncRecorder struct {
+	mu  sync.Mutex
+	rec *httptest.ResponseRecorder
+}
+
+func newSyncRecorder() *syncRecorder {
+	return &syncRecorder{rec: httptest.NewRecorder()}
+}
+
+func (r *syncRecorder) Header() http.Header { return r.rec.Header() }
+
+func (r *syncRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rec.WriteHeader(code)
+}
+
+func (r *syncRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rec.Write(p)
+}
+
+func (r *syncRecorder) Flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rec.Flush()
+}
+
+func (r *syncRecorder) BodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rec.Body.String()
+}
+
 func TestSSESendsInitialSnapshot(t *testing.T) {
 	srv, h := newTestServer(t, nil)
 	h.ConfirmLive("alex", nil)
@@ -389,7 +427,7 @@ func TestSSESendsInitialSnapshot(t *testing.T) {
 	defer cancel()
 	req = req.WithContext(ctx)
 
-	rec := httptest.NewRecorder()
+	rec := newSyncRecorder()
 	done := make(chan struct{})
 	go func() {
 		srv.Handler().ServeHTTP(rec, req)
@@ -398,7 +436,7 @@ func TestSSESendsInitialSnapshot(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "event: rooms") {
+		if strings.Contains(rec.BodyString(), "event: rooms") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -406,7 +444,7 @@ func TestSSESendsInitialSnapshot(t *testing.T) {
 	cancel()
 	<-done
 
-	out := rec.Body.String()
+	out := rec.BodyString()
 	if !strings.Contains(out, "retry: 3000") {
 		t.Fatalf("应设置重连间隔：%s", out)
 	}
