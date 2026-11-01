@@ -41,6 +41,7 @@ SRS 与 Go 后端可在同一台服务器上，通过 http_hooks 与 HTTP API �
 
 ```
 cmd/tinycast/            程序入口（信号处理、HTTP 服务、优雅退出）
+cmd/tinysim/             联调工具：用 HTTP 请求模拟 SRS 的四个回调（不含业务逻辑）
 internal/config/         环境变量配置
 internal/hub/            内存状态中心：推流鉴权、房间生命周期、观看会话、SSE 广播
 internal/httpapi/        HTTP 路由、SSE、SRS 回调、中间件
@@ -50,7 +51,7 @@ internal/webui/          前端产物嵌入与 SPA 回退
 web/                     Vue 3 + TypeScript + Vite 前端
 deploy/srs/srs.conf      SRS 6 配置（RTMP + WebRTC + 回调）
 deploy/systemd/          Linux systemd 单元与环境变量样例
-deploy/windows/          Windows 构建/启动脚本
+deploy/windows/          Windows 构建/启动脚本与双击启动的 cmd
 scripts/                 构建与开发脚本
 ```
 
@@ -88,6 +89,39 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1
 ```
 
 SRS 使用官方 Windows 版本 srs.exe -c conf\srs.conf，并把回调地址改为 127.0.0.1:8080。
+
+### Windows 免安装体验包
+
+没有 Go、Node、Docker、SRS 的 Windows 机器也能跑起来，只需要两个 exe（前端已内嵌进可执行文件）：
+
+```bash
+./scripts/build.sh --windows     # 或在 WSL/Linux 上显式交叉编译（见下）
+cd bin/windows-amd64 && ls
+# tinycast.exe  tinysim.exe  start-tinycast.cmd  simulate-srs.cmd  使用说明.txt
+```
+
+交叉编译命令（在 Linux/WSL 上执行，产物可直接拷贝到 Windows）：
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/windows-amd64/tinycast.exe ./cmd/tinycast
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/windows-amd64/tinysim.exe ./cmd/tinysim
+```
+
+在 Windows 上双击 start-tinycast.cmd 会启动服务并自动打开首页；双击 simulate-srs.cmd 会用 tinysim 依次模拟「推流 → 重复推流被拒 → 观众进出 → 断流保留 → 重新推流」，每步回读 `/api/rooms/:username` 打印真实状态。
+
+tinysim 只是把 SRS 会发的 HTTP 回调手工发一遍，它不参与业务逻辑：
+
+| 子命令 | 作用 |
+| --- | --- |
+| `demo` | 完整走一遍生命周期（默认每步停留 4s，`-step 0` 可关闭等待） |
+| `publish` / `unpublish` | 模拟 OBS 开始 / 停止推流 |
+| `play` / `stop` | 模拟一个观众进入 / 离开 |
+| `state` | 查询房间当前状态 |
+| `token` | 打印一份可直接粘贴到 OBS 的推流配置 |
+
+常用参数：`-base http://127.0.0.1:8080`、`-user alex`、`-room 演示直播间`、`-token <令牌>`、`-secret <回调密钥>`、`-client <客户端ID>`。
+
+注意：体验包里没有 SRS，房间详情页的播放器会连不上 WebRTC 信令并显示失败提示，这是预期现象；要看到真实画面仍需在本机或内网另跑 SRS 6。
 
 ## OBS 推流配置
 

@@ -31,6 +31,7 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", "", "HTTP 监听地址，覆盖环境变量 HTTP_ADDR")
+	open := flag.Bool("open", false, "启动后用默认浏览器打开首页")
 	flag.Parse()
 
 	logger := newLogger()
@@ -78,6 +79,16 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// 不设置 WriteTimeout：SSE 需要长期保持连接。
+	}
+
+	if *open {
+		// 稍等片刻再开浏览器，避免页面比监听端口先就绪。
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			if err := openBrowser(localURL(cfg.HTTPAddr)); err != nil {
+				logger.Warn("无法自动打开浏览器，请手动访问", "url", localURL(cfg.HTTPAddr), "err", err)
+			}
+		}()
 	}
 
 	errCh := make(chan error, 1)
