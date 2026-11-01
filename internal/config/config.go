@@ -64,6 +64,9 @@ type SRSConfig struct {
 	// ClientsAPIURL 非空时，清理任务会定期向 SRS 查询在线客户端，
 	// 用于修复丢失的回调（例如 SRS 重启导致的僵尸观看会话）。
 	ClientsAPIURL string
+	// StreamsAPIURL 非空时，后端会向它查询推流的编码参数（编码格式、分辨率），
+	// 用于提前判断浏览器能否解码。留空且配置了 SRS_CLIENTS_API_URL 时自动推导。
+	StreamsAPIURL string
 	// ClientsAPIUser / ClientsAPIPassword 是 SRS HTTP API 的 BasicAuth（SRS 开启 http_server 鉴权时需要）。
 	ClientsAPIUser     string
 	ClientsAPIPassword string
@@ -86,6 +89,7 @@ func Load() (*Config, error) {
 			RTCProxyTarget:     strings.TrimRight(envString("SRS_RTC_PROXY_TARGET", ""), "/"),
 			RTCPublicBase:      strings.TrimRight(envString("SRS_RTC_PUBLIC_BASE", ""), "/"),
 			ClientsAPIURL:      strings.TrimRight(envString("SRS_CLIENTS_API_URL", ""), "/"),
+			StreamsAPIURL:      strings.TrimRight(envString("SRS_STREAMS_API_URL", ""), "/"),
 			ClientsAPIUser:     envString("SRS_CLIENTS_API_USER", ""),
 			ClientsAPIPassword: envString("SRS_CLIENTS_API_PASSWORD", ""),
 		},
@@ -103,9 +107,15 @@ func Load() (*Config, error) {
 	if cfg.SRS.App == "" {
 		return nil, fmt.Errorf("config: SRS_APP 不能为空")
 	}
+	// 只配了 clients 接口时，按同一台 SRS 推导 streams 接口地址。
+	if cfg.SRS.StreamsAPIURL == "" {
+		cfg.SRS.StreamsAPIURL = srsStreamsURL(cfg.SRS.ClientsAPIURL)
+	}
+
 	for _, item := range []struct{ key, value string }{
 		{"SRS_RTC_PROXY_TARGET", cfg.SRS.RTCProxyTarget},
 		{"SRS_CLIENTS_API_URL", cfg.SRS.ClientsAPIURL},
+		{"SRS_STREAMS_API_URL", cfg.SRS.StreamsAPIURL},
 		{"PUBLIC_BASE_URL", cfg.PublicBaseURL},
 		{"SRS_RTC_PUBLIC_BASE", cfg.SRS.RTCPublicBase},
 	} {
@@ -132,6 +142,19 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// srsStreamsURL 由任意 SRS API 地址推导 /api/v1/streams/；地址非法时返回空串。
+func srsStreamsURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	// 统一去掉结尾斜杠（与其它 URL 字段一致），查询器自己会补上。
+	return u.Scheme + "://" + u.Host + "/api/v1/streams"
 }
 
 func envString(key, def string) string {

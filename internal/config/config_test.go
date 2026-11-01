@@ -121,6 +121,7 @@ func TestLoadTrimsTrailingSlash(t *testing.T) {
 		"SRS_RTMP_PUBLIC_BASE":   cfg.SRS.RTMPPublicBase,
 		"SRS_WEBRTC_PUBLIC_BASE": cfg.SRS.WebRTCPublicBase,
 		"SRS_CLIENTS_API_URL":    cfg.SRS.ClientsAPIURL,
+		"SRS_STREAMS_API_URL":    cfg.SRS.StreamsAPIURL,
 		"SRS_RTC_PROXY_TARGET":   cfg.SRS.RTCProxyTarget,
 		"SRS_RTC_PUBLIC_BASE":    cfg.SRS.RTCPublicBase,
 	} {
@@ -133,5 +134,37 @@ func TestLoadTrimsTrailingSlash(t *testing.T) {
 	}
 	if len(cfg.CORSOrigins) != 2 || cfg.CORSOrigins[0] != "https://a.example.com" {
 		t.Fatalf("CORS 列表解析错误: %v", cfg.CORSOrigins)
+	}
+}
+
+// 只配置 clients 接口时，streams 接口地址应由同一台 SRS 推导出来。
+func TestLoadDerivesStreamsURL(t *testing.T) {
+	setenv(t, map[string]string{"SRS_CLIENTS_API_URL": "http://srs:1985/api/v1/clients/"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.SRS.StreamsAPIURL != "http://srs:1985/api/v1/streams" {
+		t.Fatalf("应先推导出 streams 地址，实际 %q", cfg.SRS.StreamsAPIURL)
+	}
+}
+
+// 显式配置的 streams 地址优先，且非法地址必须被拒绝。
+func TestLoadStreamsURLOverride(t *testing.T) {
+	setenv(t, map[string]string{
+		"SRS_CLIENTS_API_URL": "http://srs:1985/api/v1/clients/",
+		"SRS_STREAMS_API_URL": "http://127.0.0.1:1986/api/v1/streams/",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.SRS.StreamsAPIURL != "http://127.0.0.1:1986/api/v1/streams" {
+		t.Fatalf("显式配置应优先（并去掉结尾斜杠），实际 %q", cfg.SRS.StreamsAPIURL)
+	}
+
+	setenv(t, map[string]string{"SRS_STREAMS_API_URL": "srs:1985"})
+	if _, err := Load(); err == nil {
+		t.Fatal("缺少协议的 streams 地址应被拒绝")
 	}
 }

@@ -7,7 +7,8 @@ import { ApiError, fetchRoom } from '../api'
 import { roomsState, findRoom } from '../composables/useRooms'
 import { useCountdown } from '../composables/useCountdown'
 import { formatAgo, formatClock } from '../lib/format'
-import type { RoomView } from '../types'
+import { mediaIssue } from '../lib/playback'
+import type { MediaInfo, RoomView } from '../types'
 
 const route = useRoute()
 const username = computed(() => String(route.params.username ?? ''))
@@ -16,6 +17,10 @@ const fallback = ref<RoomView | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
 const fetchError = ref('')
+/** 推流编码信息（来自 SRS），用于在播放前就提示"H.265 浏览器放不了"。 */
+const media = ref<MediaInfo | null>(null)
+
+const issue = computed(() => mediaIssue(media.value))
 
 /** 以 SSE 快照为准；快照尚未到达时用一次请求兜底，快照到达后不再使用兜底数据。 */
 const room = computed<RoomView | null>(() =>
@@ -37,6 +42,7 @@ async function load(): Promise<void> {
   try {
     const data = await fetchRoom(username.value)
     fallback.value = data.room
+    media.value = data.media ?? null
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       notFound.value = true
@@ -48,12 +54,38 @@ async function load(): Promise<void> {
   }
 }
 
-onMounted(load)
+/**
+ * 单独取一次房间详情拿编码信息：SSE 快照里没有它，
+ * 而 H.265 这类"注定黑屏"的情况值得在页面顶部先说清楚。
+ */
+async function loadMedia(): Promise<void> {
+  try {
+    const data = await fetchRoom(username.value)
+    media.value = data.media ?? null
+  } catch {
+    // 编码信息只是提示增强，拿不到就按"未知"处理
+  }
+}
+
+onMounted(() => {
+  void load()
+  void loadMedia()
+})
 
 watch(username, () => {
   fallback.value = null
+  media.value = null
   void load()
+  void loadMedia()
 })
+
+// 重新推流后编码可能变了（比如主播把 H.265 改成了 H.264），跟着刷新一次。
+watch(
+  () => room.value?.state,
+  (state, prev) => {
+    if (state && state !== prev) void loadMedia()
+  },
+)
 
 watch(
   room,
@@ -94,9 +126,13 @@ watch(
         </div>
       </header>
 
+      <p v-if="room.state === 'LIVE' && issue" class="media-warn">
+        {{ issue.title }}。{{ issue.detail }}
+      </p>
+
       <div class="layout">
         <div class="stage">
-          <WebRTCPlayer v-if="room.state === 'LIVE'" :room="room" />
+          <WebRTCPlayer v-if="room.state === 'LIVE'" :room="room" :media="media" />
 
           <div v-else class="grace">
             <div class="grace-inner">
@@ -200,6 +236,17 @@ watch(
 
 .dot {
   color: var(--text-faint);
+}
+
+.media-warn {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  color: #fcd34d;
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 
 .layout {

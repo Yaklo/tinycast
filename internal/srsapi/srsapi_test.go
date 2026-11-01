@@ -74,6 +74,12 @@ func TestBaseOf(t *testing.T) {
 	if got := BaseOf("http://127.0.0.1:1985/api/v1/clients/"); got != "http://127.0.0.1:1985" {
 		t.Fatalf("origin 提取错误: %q", got)
 	}
+	if got := BaseOf(""); got != "" {
+		t.Fatalf("空地址应返回空串，实际 %q", got)
+	}
+	if got := BaseOf("not-a-url"); got != "" {
+		t.Fatalf("缺少协议与主机应返回空串，实际 %q", got)
+	}
 	if got := BaseOf("::not a url"); got != "" {
 		t.Fatalf("非法地址应返回空串，实际 %q", got)
 	}

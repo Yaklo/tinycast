@@ -12,21 +12,27 @@ import (
 
 	"tinycast/internal/config"
 	"tinycast/internal/hub"
+	"tinycast/internal/srsapi"
 	"tinycast/internal/webui"
 )
 
 // Server 组装全部路由。
 type Server struct {
-	hub *hub.Hub
-	cfg *config.Config
-	log *slog.Logger
-	rtc *httputil.ReverseProxy
-	mux http.Handler
+	hub     *hub.Hub
+	cfg     *config.Config
+	log     *slog.Logger
+	rtc     *httputil.ReverseProxy
+	streams *srsapi.StreamInspector
+	mux     http.Handler
 }
 
 // New 创建 HTTP 服务。
 func New(h *hub.Hub, cfg *config.Config, log *slog.Logger) *Server {
 	s := &Server{hub: h, cfg: cfg, log: log}
+
+	if cfg.SRS.StreamsAPIURL != "" {
+		s.streams = srsapi.NewStreamInspector(cfg.SRS.StreamsAPIURL, cfg.SRS.ClientsAPIUser, cfg.SRS.ClientsAPIPassword)
+	}
 
 	if cfg.SRS.RTCProxyTarget != "" {
 		target, err := url.Parse(cfg.SRS.RTCProxyTarget)

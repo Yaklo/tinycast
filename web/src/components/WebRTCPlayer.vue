@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { fetchPlay } from '../api'
-import type { RoomView } from '../types'
+import { describeMedia, noFrameHint } from '../lib/playback'
+import type { MediaInfo, RoomView } from '../types'
 
-const props = defineProps<{ room: RoomView }>()
+const props = defineProps<{ room: RoomView; media?: MediaInfo | null }>()
 
 type Phase = 'connecting' | 'playing' | 'error'
 
@@ -11,10 +12,17 @@ const videoEl = ref<HTMLVideoElement | null>(null)
 const phase = ref<Phase>('connecting')
 const message = ref('正在建立连接…')
 const muted = ref(true)
+const showDiag = ref(false)
+const media = ref<MediaInfo | null>(props.media ?? null)
+
+/** 诊断信息：黑屏时这是唯一能让用户/运维看到"卡在哪一步"的东西。 */
+const diag = ref({ ice: '-', connection: '-', frames: 0, width: 0, height: 0, kbps: 0 })
 
 let pc: RTCPeerConnection | null = null
 let attempt = 0
 let retryTimer: number | null = null
+let watchdogTimer: number | null = null
+let iceTimer: number | null = null
 
 function clearRetry(): void {
   if (retryTimer !== null) {
@@ -23,7 +31,24 @@ function clearRetry(): void {
   }
 }
 
+function stopWatchdog(): void {
+  if (watchdogTimer !== null) {
+    window.clearInterval(watchdogTimer)
+    watchdogTimer = null
+  }
+}
+
+function stopIceTimer(): void {
+  if (iceTimer !== null) {
+    window.clearTimeout(iceTimer)
+    iceTimer = null
+  }
+}
+
 function teardown(): void {
+  clearRetry()
+  stopWatchdog()
+  stopIceTimer()
   if (pc) {
     pc.ontrack = null
     pc.onconnectionstatechange = null
@@ -33,6 +58,7 @@ function teardown(): void {
   if (videoEl.value) {
     videoEl.value.srcObject = null
   }
+  diag.value = { ice: '-', connection: '-', frames: 0, width: 0, height: 0, kbps: 0 }
 }
 
 /** 等 ICE 收集完成再发 offer：SRS 的 WHEP 需要 offer 里已带候选地址。 */
@@ -62,6 +88,74 @@ function retryLater(reason: string, delay: number): void {
   }, delay)
 }
 
+/**
+ * 连接建立后盯着 inbound-rtp 的帧数。
+ *
+ * WebRTC 的坑在于"连上了"不等于"有画面"：编码不受支持、防火墙挡了媒体口、
+ * 候选地址不可达时，connectionState 照样是 connected，只是永远没有 RTP。
+ * 这里连续 6 秒拿不到任何解码帧，就明确报出来，而不是留一块黑屏。
+ */
+function startWatchdog(generation: number, connection: RTCPeerConnection): void {
+  stopWatchdog()
+  const startedAt = Date.now()
+  let lastBytes = -1
+  let lastAt = startedAt
+
+  watchdogTimer = window.setInterval(() => {
+    if (generation !== attempt || connection !== pc) {
+      stopWatchdog()
+      return
+    }
+    void connection
+      .getStats()
+      .then((report) => {
+        if (generation !== attempt) return
+        let frames = 0
+        let bytes = 0
+        let width = 0
+        let height = 0
+        report.forEach((stats) => {
+          const item = stats as unknown as Record<string, unknown>
+          const kind = item.kind ?? item.mediaType
+          if (item.type !== 'inbound-rtp' || kind !== 'video') return
+          frames = Number(item.framesDecoded ?? 0)
+          bytes = Number(item.bytesReceived ?? 0)
+          width = Number(item.frameWidth ?? 0)
+          height = Number(item.frameHeight ?? 0)
+        })
+
+        const now = Date.now()
+        diag.value.ice = connection.iceConnectionState
+        diag.value.connection = connection.connectionState
+        diag.value.frames = frames
+        if (width && height) {
+          diag.value.width = width
+          diag.value.height = height
+        }
+        if (lastBytes >= 0 && now > lastAt) {
+          diag.value.kbps = Math.round(((bytes - lastBytes) * 8) / (now - lastAt))
+        }
+        lastBytes = bytes
+        lastAt = now
+
+        if (frames > 0) {
+          phase.value = 'playing'
+          message.value = ''
+          stopWatchdog()
+          return
+        }
+        if (now - startedAt > 6000) {
+          phase.value = 'error'
+          message.value = noFrameHint(media.value)
+          stopWatchdog()
+        }
+      })
+      .catch(() => {
+        // getStats 在连接关闭时会抛，忽略即可
+      })
+  }, 700)
+}
+
 async function start(): Promise<void> {
   const generation = ++attempt
   clearRetry()
@@ -79,6 +173,8 @@ async function start(): Promise<void> {
   try {
     const play = await fetchPlay(props.room.username)
     if (generation !== attempt) return
+
+    if (play.media) media.value = play.media
 
     if (!play.playback) {
       phase.value = 'error'
@@ -106,16 +202,31 @@ async function start(): Promise<void> {
 
     connection.onconnectionstatechange = () => {
       if (connection !== pc) return
+      diag.value.connection = connection.connectionState
       const state = connection.connectionState
       if (state === 'connected') {
-        phase.value = 'playing'
-        message.value = ''
+        // 连上只代表信令与 ICE 通了，要有解码帧才算真正播起来。
+        stopIceTimer()
+        message.value = '已连接，正在接收画面…'
+        startWatchdog(generation, connection)
       } else if (state === 'failed') {
         retryLater('连接中断，正在重试…', 1500)
       } else if (state === 'disconnected') {
         message.value = '网络抖动，正在恢复…'
       }
     }
+
+    // 9 秒还没连上，基本可以断定 UDP 8000 不通（防火墙/安全组/candidate 配错）。
+    stopIceTimer()
+    iceTimer = window.setTimeout(() => {
+      if (generation !== attempt || connection !== pc) return
+      if (connection.connectionState === 'connected') return
+      phase.value = 'error'
+      message.value =
+        '无法建立 WebRTC 连接（ICE ' +
+        connection.iceConnectionState +
+        '）：服务器的 UDP 8000 很可能被防火墙/安全组拦截。Windows 请以管理员身份运行 open-firewall.cmd；云服务器要在安全组放行 UDP 8000。'
+    }, 9000)
 
     const offer = await connection.createOffer()
     await connection.setLocalDescription(offer)
@@ -134,6 +245,16 @@ async function start(): Promise<void> {
     if (generation !== attempt) return
     if (!res.ok) {
       retryLater('信令失败（HTTP ' + res.status + '），正在重试…', 2500)
+      return
+    }
+
+    // 没配 SRS_RTC_PROXY_TARGET 时 /rtc/ 会被前端页面兜底，返回的是 index.html，
+    // 直接 setRemoteDescription 只会得到一句看不懂的 SDP 解析错误。
+    const contentType = res.headers.get('content-type') ?? ''
+    if (!contentType.includes('sdp')) {
+      phase.value = 'error'
+      message.value =
+        '信令地址返回了网页而不是 SDP：后端没有配置 SRS_RTC_PROXY_TARGET，/rtc/ 请求被前端页面兜底了。请在环境变量里补上 SRS_RTC_PROXY_TARGET=http://127.0.0.1:1985 后重启。'
       return
     }
 
@@ -160,9 +281,15 @@ function manualRetry(): void {
 /** 只在身份或状态真正变化时重连；观看人数等字段变化不应重建连接。 */
 watch(() => props.room.username + ':' + props.room.state, () => void start(), { immediate: true })
 
+watch(
+  () => props.media,
+  (value) => {
+    media.value = value ?? null
+  },
+)
+
 onBeforeUnmount(() => {
   attempt += 1
-  clearRetry()
   teardown()
 })
 </script>
@@ -183,11 +310,24 @@ onBeforeUnmount(() => {
         LIVE
       </span>
       <span class="stream-url">{{ room.username }}</span>
+      <span v-if="describeMedia(media)" class="media-chip">{{ describeMedia(media) }}</span>
+      <button type="button" class="icon-btn" :title="showDiag ? '隐藏诊断信息' : '显示诊断信息'" @click="showDiag = !showDiag">
+        🩺
+      </button>
       <button type="button" class="icon-btn" :title="muted ? '开启声音' : '静音'" @click="toggleMute">
         <template v-if="muted">🔇</template>
         <template v-else>🔊</template>
       </button>
     </div>
+
+    <dl v-if="showDiag" class="diag">
+      <div><dt>ICE</dt><dd>{{ diag.ice }}</dd></div>
+      <div><dt>连接</dt><dd>{{ diag.connection }}</dd></div>
+      <div><dt>解码帧</dt><dd>{{ diag.frames }}</dd></div>
+      <div><dt>分辨率</dt><dd>{{ diag.width && diag.height ? diag.width + '×' + diag.height : '-' }}</dd></div>
+      <div><dt>码率</dt><dd>{{ diag.kbps ? diag.kbps + ' kbps' : '-' }}</dd></div>
+      <div><dt>编码</dt><dd>{{ describeMedia(media) || '未知' }}</dd></div>
+    </dl>
   </div>
 </template>
 
@@ -284,6 +424,19 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--text-dim);
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
 }
 
 .icon-btn {
@@ -296,6 +449,38 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-size: 13px;
   line-height: 1;
+}
+
+.diag {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  margin: 0;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 11.5px;
+  background: rgba(3, 6, 11, 0.86);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text-dim);
+  max-width: 260px;
+}
+
+.diag div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.diag dt {
+  color: var(--text-faint);
+}
+
+.diag dd {
+  margin: 0;
+  font-family: var(--mono);
+  color: var(--text);
 }
 
 .btn-sm {

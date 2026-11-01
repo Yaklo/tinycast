@@ -20,6 +20,16 @@ export interface Snapshot {
   rooms: RoomView[]
 }
 
+/** 后端从 SRS 取回的推流编码信息，缺字段表示 SRS 未上报。 */
+export interface MediaInfo {
+  videoCodec?: string
+  videoProfile?: string
+  videoLevel?: string
+  width?: number
+  height?: number
+  audioCodec?: string
+}
+
 export interface RoomsResponse {
   rooms: RoomView[]
   serverTime: number
@@ -28,6 +38,7 @@ export interface RoomsResponse {
 
 export interface RoomResponse {
   room: RoomView
+  media?: MediaInfo | null
   serverTime: number
   graceSeconds: number
 }
@@ -44,6 +55,7 @@ export interface PlayResponse {
   state: RoomState
   graceUntil?: number
   playback: Playback | null
+  media?: MediaInfo | null
   serverTime: number
   graceSeconds: number
 }

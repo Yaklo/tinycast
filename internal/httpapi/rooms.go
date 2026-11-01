@@ -26,6 +26,7 @@ func (s *Server) handleRooms(w http.ResponseWriter, _ *http.Request) {
 
 type roomResponse struct {
 	Room         hub.RoomView `json:"room"`
+	Media        *mediaInfo   `json:"media,omitempty"`
 	ServerTime   int64        `json:"serverTime"`
 	GraceSeconds int          `json:"graceSeconds"`
 }
@@ -39,6 +40,7 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, roomResponse{
 		Room:         view,
+		Media:        s.media(r.Context(), view.Username),
 		ServerTime:   time.Now().UnixMilli(),
 		GraceSeconds: s.graceSeconds(),
 	})
@@ -54,12 +56,13 @@ type playback struct {
 }
 
 type playResponse struct {
-	Username     string    `json:"username"`
-	State        hub.State `json:"state"`
-	GraceUntil   int64     `json:"graceUntil,omitempty"`
-	Playback     *playback `json:"playback"`
-	ServerTime   int64     `json:"serverTime"`
-	GraceSeconds int       `json:"graceSeconds"`
+	Username     string     `json:"username"`
+	State        hub.State  `json:"state"`
+	GraceUntil   int64      `json:"graceUntil,omitempty"`
+	Playback     *playback  `json:"playback"`
+	Media        *mediaInfo `json:"media,omitempty"`
+	ServerTime   int64      `json:"serverTime"`
+	GraceSeconds int        `json:"graceSeconds"`
 }
 
 // handlePlay 返回播放信息；GRACE 状态下不会给出播放地址，避免前端播放"假直播"。
@@ -78,6 +81,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 		GraceSeconds: s.graceSeconds(),
 	}
 	if view.State == hub.StateLive {
+		resp.Media = s.media(r.Context(), view.Username)
 		resp.Playback = &playback{
 			Protocol:  "webrtc",
 			WhepURL:   s.whepURL(view.Username),

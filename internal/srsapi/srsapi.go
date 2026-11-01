@@ -81,9 +81,15 @@ func (i *Inspector) Clients(ctx context.Context) ([]Client, error) {
 }
 
 // BaseOf 从完整 API 地址里取出 origin，便于拼接其它接口。
+//
+// 空串或缺少协议/主机的地址返回空串：url.Parse 对这类输入不报错，
+// 但拼出来的 ":///api/v1/..." 会让调用方误以为拿到了可用地址。
 func BaseOf(raw string) string {
+	if raw == "" {
+		return ""
+	}
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || u.Scheme == "" || u.Host == "" {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
