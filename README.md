@@ -115,6 +115,7 @@ Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编
 | `tinycast.env` | 全部运行配置（KEY=VALUE，逐项带注释），由 `-config` 读取 |
 | `start-all.cmd` | 生产启动：先拉起 SRS，再启动 tinycast 并打开首页 |
 | `start.cmd` | 只启动 tinycast（SRS 在别处时用），可传参如 `start.cmd -open` |
+| `open-firewall.cmd` | 右键「以管理员身份运行」，一次性放通 TCP 1935/8080/1985 与 UDP 8000 |
 | `srs/objs/srs.exe` | SRS 6.0.172 官方 Cygwin 构建，附 5 个 Cygwin 运行库（含官方包缺失的 cygiconv-2.dll、cygintl-8.dll） |
 | `srs/conf/srs.conf` | 由 [deploy/srs/srs.windows.conf](deploy/srs/srs.windows.conf) 复制，四个回调指向 `http://127.0.0.1:8080/internal/srs/*` |
 | `logs/`、`srs/logs/` | 运行日志目录，tinycast 日志默认 16MB 滚动、保留 3 份 |
@@ -128,7 +129,7 @@ Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编
 4. OBS → 设置 → 直播 → 服务选「自定义」，填入两项后开始推流；
 5. 首页立刻出现 LIVE 房间，点进去看 WebRTC 画面，在线人数随观看者增减；OBS 停止推流后房间进入 GRACE 并倒计时，5 分钟内重推恢复 LIVE，超时释放。
 
-局域网/公网观看：把 `srs/conf/srs.conf` 的 `candidate 127.0.0.1` 改成对内/对外的 IP 或域名，`tinycast.env` 里同步 `SRS_RTMP_PUBLIC_BASE`、`SRS_WEBRTC_PUBLIC_BASE`、`PUBLIC_BASE_URL`，并放通 TCP 1935、TCP 8080（或 80/443）、UDP 8000。端口分工：1935/tcp RTMP、1985/tcp SRS HTTP API（仅本机）、8000/udp WebRTC、8080/tcp 页面与接口。
+局域网/公网观看：包内 `candidate *` 会由 SRS 自动探测本机网卡地址，本机浏览器与局域网内其它设备一般无需改配置；云主机在 NAT 后面时要把它改成公网 IP 或域名。`tinycast.env` 里同步 `SRS_RTMP_PUBLIC_BASE`、`SRS_WEBRTC_PUBLIC_BASE`、`PUBLIC_BASE_URL`；端口用 `open-firewall.cmd`（管理员运行）一键放通 TCP 1935、TCP 8080（或 80/443）、UDP 8000。端口分工：1935/tcp RTMP、1985/tcp SRS HTTP API（仅本机）、8000/udp WebRTC、8080/tcp 页面与接口。
 
 长期运行：`tinycast.exe` 是控制台程序，Ctrl+C 即优雅停止；需要开机自启/崩溃重启时用「任务计划程序」触发 `start-all.cmd`，或用 NSSM / WinSW 把 `tinycast.exe` 注册成服务。
 
@@ -210,6 +211,7 @@ curl -N http://127.0.0.1:8080/api/events      # 持续接收快照
 | SRS_RTC_PROXY_TARGET | 空 | 设置后把同源 /rtc/* 反代到 SRS HTTP API |
 | SRS_RTC_PUBLIC_BASE | 空 | 设置后 WHEP 地址使用绝对地址直连 SRS |
 | SRS_CLIENTS_API_URL | 空 | SRS 客户端列表地址，设置后启用僵尸会话核对 |
+| SRS_STREAMS_API_URL | 由 SRS_CLIENTS_API_URL 推导 | SRS 流信息地址，用于读取推流编码与分辨率，在页面提前提示"编码放不了" |
 | SRS_CLIENTS_API_USER / SRS_CLIENTS_API_PASSWORD | 空 | 访问 SRS HTTP API 的 BasicAuth |
 | CORS_ALLOWED_ORIGINS | 空 | 前后端不同源时的允许来源 |
 | PUBLIC_BASE_URL | 空 | 对外访问地址（用于生成绝对链接） |
@@ -281,9 +283,21 @@ go run ./cmd/tinysim token -user alex        # 打印一份可直接粘贴到 OB
 | --- | --- |
 | OBS 提示推流失败 | 看 Go 日志中的 reason 字段：username_bound_to_other_token / token_bound_to_other_username / already_publishing 等；确认 5 分钟保留期是否已释放 |
 | 房间列表没有房间 | 只有 on_publish 放行后才会创建房间；检查 srs.conf 的 http_hooks 地址与端口 |
-| 页面能打开但一直黑屏 | 确认 CANDIDATE / SRS_CANDIDATE 为公网可达 IP；放通 8000/udp；HTTPS 页面必须配 HTTPS 的 WHEP 地址，否则浏览器会拦截混合内容 |
+| 页面能打开但一直黑屏 | 见下方「画面黑屏怎么排查」 |
 | 在线人数不准 | 确认 SRS 已开启 on_play / on_stop 回调；异常断开由定时任务核对 SRS 客户端列表兜底，可配置 SRS_CLIENTS_API_URL |
 | 播放 404 / CORS 报错 | 同源部署时配置 SRS_RTC_PROXY_TARGET=http://127.0.0.1:1985，由后端反代 /rtc/* |
+
+### 画面黑屏怎么排查
+
+SRS 6 的 `rtmp_to_rtc` **只做封装转换，不做视频转码**，浏览器能放的只有 H.264。所以"连接成功但没有画面"绝大多数是编码或 UDP 通路问题，按下面顺序看：
+
+1. **OBS 是否用了 H.265 / HEVC**：SDP 照常协商成功，SRS 却一个视频包都不发，页面于是静默黑屏。后端会通过 SRS 的 `/api/v1/streams/` 读到实际编码，页面直接显示"主播使用 H.265 推流，浏览器无法解码"。
+2. **H.264 的档次是否超前**：4:4:4、4:2:2、10bit（High 4:4:4 Predictive / High 10）浏览器同样解不了，要在 OBS 里改回 High/Main + 4:2:0 8bit。
+3. **UDP 8000 是否放通**：防火墙、云安全组、Docker 的 `8000-udp` 端口映射缺一不可；HTTPS 页面配 HTTP 的 WHEP 地址会被混合内容策略拦截。
+4. **candidate 是否可达**：默认 `candidate *` 由 SRS 自动探测网卡地址，本机与局域网都能连；云主机在 NAT 后面时要写公网 IP/域名，否则浏览器只会拿到内网候选地址。
+5. **用播放器的 🩺 诊断面板确认**：可展开看 ICE 状态、已解码帧数、分辨率与码率。帧数一直为 0 说明是上面 1~4 之一；帧数在涨却仍然黑屏，通常是浏览器硬件解码或截图工具的问题。
+
+页面上的提示来自后端的 `media` 字段（`videoCodec`/`videoProfile`/`width`/`height` 等）与播放器 `getStats()` 的实时统计，后者在连续 6 秒收不到任何视频帧时触发，不必等页面报错。
 
 ## 许可
 

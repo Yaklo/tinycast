@@ -38,6 +38,9 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for base, dirs, files in os.walk(src):
         dirs.sort()
         for name in sorted(files):
+            # SRS 运行期残留的 pid/id 文件与日志一样不进包
+            if name.endswith((".pid", ".id")):
+                continue
             full = os.path.join(base, name)
             z.write(full, os.path.relpath(full, src))
 PY

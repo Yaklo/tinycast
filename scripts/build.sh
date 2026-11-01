@@ -59,7 +59,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinycast$SUFFIX" .
 if [[ "$OUTDIR" == "bin/windows-amd64" ]]; then
   # Windows 生产运行包：可执行文件 + 配置文件 + 启动脚本 + 说明，SRS 由 fetch-srs-windows.sh 放入 srs/
   cp deploy/windows/tinycast.env deploy/windows/start.cmd deploy/windows/start-all.cmd \
-    deploy/windows/部署说明.txt "$OUTDIR/"
+    deploy/windows/open-firewall.cmd deploy/windows/部署说明.txt "$OUTDIR/"
   mkdir -p "$OUTDIR/logs" "$OUTDIR/srs/conf"
   if [[ -f deploy/srs/srs.windows.conf ]]; then
     cp deploy/srs/srs.windows.conf "$OUTDIR/srs/conf/srs.conf"

@@ -6,6 +6,7 @@
   tinycast.env        全部运行配置（KEY=VALUE，逐项都有注释）
   start-all.cmd       启动 SRS + TinyCast（生产环境用这个）
   start.cmd           只启动 TinyCast（SRS 已在别处运行时用）
+  open-firewall.cmd   放通端口用（右键"以管理员身份运行"，只需跑一次）
   srs\objs\srs.exe    SRS 6.0.172 官方 Windows 构建
   srs\objs\*.dll     SRS 依赖的 Cygwin 运行库（5 个），必须与 srs.exe 同目录：
                       cygwin1.dll、cyggcc_s-seh-1.dll、cygstdc++-6.dll、
@@ -31,17 +32,22 @@
      5 分钟内用同一用户名和令牌重推会恢复 LIVE，超时后房间自动释放并从首页消失。
 
 三、改为局域网 / 公网访问
-  1. srs\conf\srs.conf 中 rtc_server 的 candidate 改成对外地址：
-       candidate 192.168.1.10;            局域网
+  1. srs\conf\srs.conf 中 rtc_server 的 candidate：
+       默认 candidate *; 由 SRS 自动探测本机网卡地址，本机与局域网内手机/其它电脑
+       都能直接观看，一般不用改。
+       服务器在 NAT 后面（云主机、家用路由器）时改成公网可达的地址：
+       candidate 1.2.3.4;                 公网 IP
        candidate live.example.com;        域名（需公网可解析）
   2. tinycast.env 中把对外地址填上：
        SRS_RTMP_PUBLIC_BASE=rtmp://<对外地址>:1935/live
        SRS_WEBRTC_PUBLIC_BASE=webrtc://<对外地址>:1935/live
        PUBLIC_BASE_URL=https://<对外地址>          （启用 HTTPS 时填写）
-  3. Windows 防火墙放通：
+  3. Windows 防火墙放通：右键 open-firewall.cmd →「以管理员身份运行」（可重复执行）。
+       手工放通的端口是：
        TCP 1935   OBS 推流（RTMP）
        TCP 8080   页面与接口（若用 80/443 反代则放通对应端口）
-       UDP 8000   WebRTC 媒体，浏览器观看必需
+       TCP 1985   SRS HTTP API（仅内网诊断用，可不放通）
+       UDP 8000   WebRTC 媒体，浏览器观看必需（漏了就是"能进房间但画面黑"）
   4. 生产建议在前面加 Caddy / Nginx 做 HTTPS 反向代理到 127.0.0.1:8080。
      注意：反代必须拒绝 /internal/ 路径（那是 SRS 回调），否则任何人只要伪造 POST
      就能创建房间；不放心的话再设置 SRS_CALLBACK_SECRET，并同步修改
@@ -76,7 +82,18 @@
   - 首页没有房间：先看 logs\tinycast.log 有没有「推流开始」；OBS 侧连不上就看 srs\logs\srs.log。
   - OBS 推流被拒（StConnect 失败）：同一用户名+令牌已有一路推流，或令牌与他人用户名冲突；
     换一份配置，或等原身份 5 分钟释放后再推。
-  - 能进房间但画面黑：UDP 8000 未放通，或 candidate 不是浏览器可达的地址。
+  - 能进房间但画面黑：按顺序看下面四条，页面上的提示会直接指出属于哪一条。
+      ① OBS 用 H.265(HEVC) 推流：SRS 的 rtmp_to_rtc 不做转码，浏览器只协商 H.264，
+         于是连接"成功"但一个视频包都收不到。OBS → 设置 → 输出 → 直播：
+         编码器选 x264 或 NVENC/QuickSync 的 H.264，关键帧间隔 2 秒。
+         页面会显示"主播使用 H.265 推流，浏览器无法解码"。
+      ② 编码档次不支持：H.264 的 4:4:4 或 10bit（High 4:4:4 Predictive / High 10）
+         浏览器同样放不了，改成 profile High/Main + 4:2:0 8bit。
+      ③ UDP 8000 被拦：防火墙、云安全组、或 candidate 指向了浏览器到不了的地址
+         （例如默认的 127.0.0.1，却用手机访问）。先跑 open-firewall.cmd，
+         再把 candidate 改成 * 或对外 IP。
+      ④ 播放器左下角「🩺 诊断」可展开看 ICE 状态、已解码帧数、分辨率与码率：
+         帧数一直是 0 就是①②③之一；帧数在涨但画面黑多为浏览器硬件解码问题。
   - 人数一直是 0：确认 srs\conf\srs.conf 的 http_hooks 指向 127.0.0.1:8080，且 TinyCast 已启动。
   - 想确认链路是否通：curl http://127.0.0.1:8080/api/healthz 与
     curl http://127.0.0.1:1985/api/v1/versions 都应返回 JSON。
