@@ -16,11 +16,15 @@ TinyCast Windows 运行包使用说明
   tinycast.exe            业务后端（网页也打包在里面）
   tinycast.env            配置，改完要重启 TinyCast 生效
   version.txt             本次构建的版本号、提交与构建时间
+  LICENSE                 本项目 MIT 许可
+  THIRD-PARTY-NOTICES.md  第三方组件（MediaMTX/hls.js/Vue/Go）的许可与版权
+  README.md               项目说明
   start-all.cmd           一键启动 MediaMTX + TinyCast（推荐）
   start.cmd               只启动 TinyCast（MediaMTX 已单独在跑时用）
   open-firewall.cmd       从其它设备访问时放通端口（可选，需管理员权限）
   mediamtx\mediamtx.exe   MediaMTX 主程序
   mediamtx\mediamtx.yml   MediaMTX 配置（推流鉴权回调写在这里）
+  mediamtx\LICENSE        MediaMTX 的 MIT 许可（必须随包保留）
   logs\                   运行日志，出问题时先看这里
 
 

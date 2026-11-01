@@ -99,6 +99,8 @@ docker compose up -d --build
 | `dist/tinycast-<版本>-windows-amd64.zip` | 双击 `start-all.cmd` 即用，见包内 `部署说明.txt` |
 | `dist/SHA256SUMS` | 校验和，`sha256sum -c SHA256SUMS` 验证 |
 
+两个包内都带 `LICENSE`、`README.md` 与 `THIRD-PARTY-NOTICES.md`，MediaMTX 的 MIT 许可副本在 `mediamtx/LICENSE`。
+
 查询版本：
 
 ```bash
@@ -373,6 +375,7 @@ deploy/systemd/          mediamtx.service、tinycast.service、env 样例
 deploy/windows/          Windows 启动脚本与说明
 deploy/linux/            Linux 发布包的 start.sh 与 env 样例
 scripts/                 构建、开发、打包脚本（package-release.sh 一键出包）
+THIRD-PARTY-NOTICES.md   第三方组件许可与版权（随发布包分发）
 dist/                    发布产物（不入库）
 ```
 
@@ -407,4 +410,13 @@ dist/                    发布产物（不入库）
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。
+TinyCast 本身以 MIT 许可发布，见 [LICENSE](LICENSE)。
+
+发布包与 Docker 镜像里还带着第三方组件，各自的版权与许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)：
+
+- **MediaMTX**（MIT）：随包分发的 `mediamtx` 二进制，许可副本在包内 `mediamtx/LICENSE`；
+- **hls.js**（Apache-2.0）：打包进前端 bundle，bundle 顶部保留了归属声明；
+- **Vue / vue-router**（MIT）：同上；
+- **Go 标准库**（BSD-3-Clause）：静态链接进后端二进制。
+
+Docker 镜像内的许可文件位于 `/usr/share/doc/tinycast/`。

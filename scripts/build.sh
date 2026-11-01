@@ -69,6 +69,8 @@ if [[ "${GOOS:-}" == "windows" ]]; then
   # Windows 运行包：tinycast.exe + MediaMTX（需先跑 fetch-mediamtx-windows.sh）+ 启动脚本 + 说明
   cp deploy/windows/tinycast.env deploy/windows/start.cmd deploy/windows/start-all.cmd \
     deploy/windows/open-firewall.cmd deploy/windows/部署说明.txt "$OUTDIR/"
+  # 许可与归属信息必须随二进制一起分发
+  cp LICENSE README.md THIRD-PARTY-NOTICES.md "$OUTDIR/"
   mkdir -p "$OUTDIR/logs" "$OUTDIR/mediamtx"
   cp deploy/mediamtx/mediamtx.yml "$OUTDIR/mediamtx/mediamtx.yml"
   if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then

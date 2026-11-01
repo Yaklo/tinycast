@@ -45,14 +45,23 @@ import os, sys, tarfile
 
 src, dest = sys.argv[1], sys.argv[2]
 with tarfile.open(src, 'r:gz') as tf:
-    member = next((m for m in tf.getmembers() if os.path.basename(m.name) == 'mediamtx' and m.isfile()), None)
+    members = tf.getmembers()
+    member = next((m for m in members if os.path.basename(m.name) == 'mediamtx' and m.isfile()), None)
     if member is None:
         raise SystemExit('压缩包里没有 mediamtx 可执行文件')
     target = os.path.join(dest, 'mediamtx')
     with tf.extractfile(member) as f, open(target, 'wb') as out:
         out.write(f.read())
-os.chmod(target, 0o755)
-print('    ' + target)
+    os.chmod(target, 0o755)
+    print('    ' + target)
+    # MIT 要求分发的每一份副本都带版权与许可声明
+    lic = next((m for m in members if os.path.basename(m.name).lower() == 'license' and m.isfile()), None)
+    if lic is None:
+        raise SystemExit('压缩包里没有 LICENSE')
+    lic_target = os.path.join(dest, 'LICENSE')
+    with tf.extractfile(lic) as f, open(lic_target, 'wb') as out:
+        out.write(f.read())
+    print('    ' + lic_target)
 PY
 
 echo "==> 完成：$DEST"

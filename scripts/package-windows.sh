@@ -24,7 +24,7 @@ DIST="${DIST:-dist}"
 ZIP="$DIST/tinycast-${VERSION}-windows-amd64.zip"
 mkdir -p "$DIST"
 
-if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
+if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" || ! -f "$OUTDIR/mediamtx/LICENSE" ]]; then
   echo "==> 首次构建，先获取 MediaMTX 的 Windows 版本"
   ./scripts/fetch-mediamtx-windows.sh
 fi
@@ -38,6 +38,7 @@ if [[ -e "$OUTDIR/tinycast.exe" ]] && ! rm -f "$OUTDIR/tinycast.exe" 2>/dev/null
   rm -rf "$STAGE"
   mkdir -p "$STAGE/mediamtx"
   cp "$OUTDIR/mediamtx/mediamtx.exe" "$STAGE/mediamtx/mediamtx.exe"
+  cp "$OUTDIR/mediamtx/LICENSE" "$STAGE/mediamtx/LICENSE"
 fi
 
 WIN_OUTDIR="$WIN_OUTDIR" ./scripts/build.sh --windows

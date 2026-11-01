@@ -1,6 +1,6 @@
 [Unit]
 Description=TinyCast 直播业务后端
-Documentation=https://github.com/ai-yaklo/tinycast
+Documentation=https://github.com/Yaklo/tinycast
 After=network-online.target mediamtx.service
 Wants=network-online.target
 

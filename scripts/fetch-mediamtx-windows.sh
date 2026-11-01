@@ -51,6 +51,14 @@ with zipfile.ZipFile(src) as z:
         with z.open(name) as f, open(target, 'wb') as out:
             out.write(f.read())
         print('    ' + target)
+    # MIT 要求分发的每一份副本都带版权与许可声明
+    lic = next((n for n in z.namelist() if os.path.basename(n).lower() == 'license' and not n.endswith('/')), None)
+    if lic is None:
+        raise SystemExit('压缩包里没有 LICENSE')
+    lic_target = os.path.join(dest, 'LICENSE')
+    with z.open(lic) as f, open(lic_target, 'wb') as out:
+        out.write(f.read())
+    print('    ' + lic_target)
 PY
 
 echo "==> 完成：$DEST"

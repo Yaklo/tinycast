@@ -31,6 +31,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -u 10001 tinycast
+LABEL org.opencontainers.image.title="TinyCast" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/Yaklo/tinycast"
+# MIT 与 Apache-2.0 都要求分发的副本里带上版权与许可声明
+COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/tinycast/
 COPY --from=build /out/tinycast /usr/local/bin/tinycast
 USER tinycast
 EXPOSE 18855

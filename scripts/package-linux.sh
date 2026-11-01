@@ -24,7 +24,7 @@ DIST="${DIST:-dist}"
 NAME="tinycast-${VERSION}-linux-${ARCH}"
 STAGE=".tools/linuxpkg-stage/$NAME"
 
-if [[ ! -x "$OUTDIR/mediamtx/mediamtx" ]]; then
+if [[ ! -x "$OUTDIR/mediamtx/mediamtx" || ! -f "$OUTDIR/mediamtx/LICENSE" ]]; then
   echo "==> 首次构建，先获取 MediaMTX 的 Linux 版本"
   ARCH="$ARCH" DEST="$OUTDIR/mediamtx" ./scripts/fetch-mediamtx-linux.sh
 fi
@@ -37,8 +37,10 @@ mkdir -p "$STAGE/mediamtx" "$STAGE/systemd"
 cp "$OUTDIR/tinycast" "$STAGE/tinycast"
 cp deploy/linux/tinycast.env "$STAGE/tinycast.env"
 cp deploy/linux/start.sh "$STAGE/start.sh"
+cp LICENSE README.md THIRD-PARTY-NOTICES.md "$STAGE/"
 cp deploy/mediamtx/mediamtx.yml "$STAGE/mediamtx/mediamtx.yml"
 cp "$OUTDIR/mediamtx/mediamtx" "$STAGE/mediamtx/mediamtx"
+cp "$OUTDIR/mediamtx/LICENSE" "$STAGE/mediamtx/LICENSE"
 cp deploy/systemd/tinycast.service deploy/systemd/mediamtx.service "$STAGE/systemd/"
 chmod +x "$STAGE/tinycast" "$STAGE/start.sh" "$STAGE/mediamtx/mediamtx"
 
