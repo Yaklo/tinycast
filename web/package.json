@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "type-check": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview"
   },
   "packageManager": "pnpm@10.33.2",
@@ -16,8 +18,11 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^19.0.2",
     "typescript": "^5.9.3",
     "vite": "^8.3.5",
+    "vitest": "^5.0.5",
     "vue-tsc": "^3.3.14"
   }
 }

@@ -171,6 +171,7 @@ curl -N http://127.0.0.1:8080/api/events      # 持续接收快照
 source scripts/dev-env.sh     # 仅在 $HOME 不可写、需要仓库内工具链时使用
 ./scripts/dev.sh              # 后端 :8080 + Vite :5173（/api、/rtc 已代理到后端）
 go test -race ./...           # 后端测试
+cd web && pnpm test           # 前端单元测试（vitest + happy-dom）
 cd web && pnpm build          # 前端生产构建，产物进入 internal/webui/dist
 ```
 
