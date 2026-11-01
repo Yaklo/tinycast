@@ -5,14 +5,28 @@ import type { RoomView } from '../types'
 
 const { fetchPlayMock, hlsLog } = vi.hoisted(() => ({
   fetchPlayMock: vi.fn(),
-  hlsLog: { loadSource: [] as string[], attachMedia: 0, destroyed: 0, instances: [] as unknown[] },
+  hlsLog: {
+    loadSource: [] as string[],
+    attachMedia: 0,
+    destroyed: 0,
+    instances: [] as unknown[],
+    handlers: new Map<string, ((event: string, data?: unknown) => void)[]>(),
+    emit(event: string, data?: unknown) {
+      for (const handler of hlsLog.handlers.get(event) ?? []) handler(event, data)
+    },
+  },
 }))
 
 vi.mock('../api', () => ({ fetchPlay: fetchPlayMock }))
 
 vi.mock('hls.js', () => {
   class FakeHls {
-    static Events = { MANIFEST_PARSED: 'hlsManifestParsed', ERROR: 'hlsError' }
+    static Events = {
+      MANIFEST_PARSED: 'hlsManifestParsed',
+      ERROR: 'hlsError',
+      FRAG_LOADED: 'hlsFragLoaded',
+      LEVEL_UPDATED: 'hlsLevelUpdated',
+    }
     static ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError' }
     static isSupported = () => true
     bandwidthEstimate = 800_000
@@ -28,7 +42,10 @@ vi.mock('hls.js', () => {
     attachMedia() {
       hlsLog.attachMedia += 1
     }
-    on() {}
+    on(event: string, handler: (event: string, data?: unknown) => void) {
+      const list = hlsLog.handlers.get(event) ?? []
+      hlsLog.handlers.set(event, [...list, handler])
+    }
     startLoad() {}
     recoverMediaError() {}
     destroy() {
@@ -156,6 +173,7 @@ beforeEach(() => {
   hlsLog.attachMedia = 0
   hlsLog.destroyed = 0
   hlsLog.instances = []
+  hlsLog.handlers = new Map()
   FakePeerConnection.instances = []
   localStorage.clear()
   vi.stubGlobal('RTCPeerConnection', FakePeerConnection)
@@ -195,7 +213,7 @@ describe('LivePlayer', () => {
     }
 
     const tabs = wrapper.findAll('.chart-tab').map((node) => node.text())
-    expect(tabs).toEqual(['下载速率', '帧率', '缓冲延迟', 'RTT', '丢包率'])
+    expect(tabs).toEqual(['下载速率', '帧率', '缓冲余量', 'RTT', '丢包率'])
     expect(wrapper.find('.chart-value').text()).toBe('1.00 Mbps')
     expect(wrapper.find('.chart-line').exists()).toBe(true)
 
@@ -214,6 +232,64 @@ describe('LivePlayer', () => {
     expect(hlsLog.attachMedia).toBe(1)
     expect(wrapper.findAll('.mode-btn').map((node) => node.text())).toEqual(['HLS', '低延迟'])
     expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
+  })
+
+  it('HLS 通道用分片数据算码率，不展示 RTT 与丢包', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    // 原生 controls 会和自绘控制条叠在一起，模板里不能再出现这个属性
+    expect(wrapper.find('video').attributes('controls')).toBeUndefined()
+
+    hlsLog.emit('hlsManifestParsed')
+    await flushPromises()
+
+    hlsLog.emit('hlsFragLoaded', {
+      frag: { type: 'video', duration: 1 },
+      stats: { loaded: 500_000, loading: { start: 0, end: 250 } },
+    })
+    hlsLog.emit('hlsFragLoaded', {
+      frag: { type: 'audio', duration: 1 },
+      stats: { loaded: 12_000, loading: { start: 0, end: 100 } },
+    })
+    hlsLog.emit('hlsLevelUpdated', { details: { fragments: [{ end: 10 }] } })
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const tabs = wrapper.findAll('.chart-tab').map((node) => node.text())
+    expect(tabs).toEqual(['下载速率', '帧率', '缓冲余量', '直播延迟'])
+
+    const grid = wrapper.find('.stats-grid').text()
+    expect(grid).toContain('4.00 Mbps')
+    expect(grid).toContain('96 kbps')
+    expect(grid).toContain('500 KB')
+    expect(grid).not.toContain('往返时延')
+    expect(grid).not.toContain('抖动')
+    expect(wrapper.find('.stats-note').text()).toContain('RTT')
+  })
+
+  it('播放中控制条静止 2.5 秒自动收起，动一下鼠标再出来', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    hlsLog.emit('hlsManifestParsed')
+    await flushPromises()
+    expect(wrapper.find('.controls').attributes('style') ?? '').not.toContain('display: none')
+
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+    // v-show 会把 display 写成 none（happy-dom 下 isVisible() 不可靠，直接看 style）
+    expect(wrapper.find('.controls').attributes('style') ?? '').toContain('display: none')
+
+    await wrapper.find('.player').trigger('mousemove')
+    await flushPromises()
+    expect(wrapper.find('.controls').attributes('style') ?? '').not.toContain('display: none')
   })
 
   it('两个通道都可用时可以切换到低延迟', async () => {

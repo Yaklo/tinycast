@@ -54,6 +54,9 @@ const playback = ref<Playback | null>(null)
 const muted = ref(true)
 const theater = ref(false)
 const showStats = ref(false)
+/** 控制条是否显示：播放中鼠标静止 2.5 秒自动收起，动一下鼠标再出来。 */
+const controlsVisible = ref(true)
+let controlsTimer: ReturnType<typeof setTimeout> | null = null
 /** 距离直播边缘的秒数：hls.js 直接给出，原生 HLS 用 seekable 末端估算。 */
 const latencySec = ref(0)
 /** 从低延迟通道自动回退到 HLS 时的说明条。 */
@@ -64,7 +67,8 @@ const HISTORY_LIMIT = 60
 const METRICS = [
   { key: 'kbps', label: '下载速率' },
   { key: 'fps', label: '帧率' },
-  { key: 'bufferMs', label: '缓冲延迟' },
+  { key: 'bufferMs', label: '缓冲余量' },
+  { key: 'latency', label: '直播延迟' },
   { key: 'rttMs', label: 'RTT' },
   { key: 'lossRate', label: '丢包率' },
 ] as const
@@ -97,6 +101,18 @@ let lastFrameAt = 0
 let lastFrameCount = 0
 /** HLS 侧的累计丢帧数：getVideoPlaybackQuality 给的是累计值，需要自己差分。 */
 let droppedTotal = 0
+/** HLS 累计下载字节（视频 + 音频 + 音频轨）。 */
+let hlsBytes = 0
+/** 最近几个分片的 字节数 / 媒体时长，用来算视频、音频码率。 */
+let hlsVideoWindow: { bytes: number; duration: number }[] = []
+let hlsAudioWindow: { bytes: number; duration: number }[] = []
+/** 最近几次分片请求的 字节数 / 耗时，用来算真实下载速率。 */
+let hlsLoads: { bytes: number; ms: number }[] = []
+/** 自动追平直播边缘的节流时间戳。 */
+let lastCatchUp = 0
+/** 清单给出的直播边缘（媒体时间）与记录时刻，用来算真实延迟。 */
+let edgePos = 0
+let edgeAt = 0
 /** WebRTC 起播时刻，用来判断“连上很久却一帧都没有”。 */
 let webrtcSince = 0
 /** 同一次播放里只自动回退一次，避免通道来回跳。 */
@@ -114,6 +130,15 @@ const canSwitch = computed(() => {
 })
 
 const issue = computed(() => mediaIssue(props.media, mode.value))
+
+/** HLS 走 HTTP 分片，没有 RTP 统计：RTT / 丢包不展示；WebRTC 拿不到分片延迟。 */
+const metrics = computed(() =>
+  METRICS.filter((tab) => {
+    if (mode.value === 'hls' && (tab.key === 'rttMs' || tab.key === 'lossRate')) return false
+    if (mode.value !== 'hls' && tab.key === 'latency') return false
+    return true
+  }),
+)
 
 const chartPath = computed(() => {
   const values = history.value.map((item) => valueOf(item, metric.value))
@@ -134,7 +159,7 @@ const peakValue = computed(() => {
 const grid = computed(() => {
   const s = sample.value
   const media = props.media
-  return [
+  const rows: { label: string; value: string }[] = [
     { label: '播放通道', value: mode.value === 'hls' ? 'HLS' : 'WebRTC' },
     { label: '视频编码', value: labelOrDash(media?.videoCodec) },
     { label: '音频编码', value: labelOrDash(media?.audioCodec) },
@@ -142,16 +167,44 @@ const grid = computed(() => {
     { label: '播放帧率', value: s && s.fps > 0 ? s.fps.toFixed(1) + ' fps' : '—' },
     { label: '视频码率', value: s && s.videoKbps > 0 ? formatKbps(s.videoKbps) : '—' },
     { label: '音频码率', value: s && s.audioKbps > 0 ? formatKbps(s.audioKbps) : '—' },
-    { label: '丢包/丢帧', value: s ? (s.lossRate > 0 ? (s.lossRate * 100).toFixed(2) + '%' : '0%') : '—' },
-    { label: '抖动', value: s && s.jitterMs > 0 ? s.jitterMs + ' ms' : '—' },
-    { label: '缓冲延迟', value: s && s.bufferMs > 0 ? s.bufferMs + ' ms' : '—' },
-    { label: '直播延迟', value: latencySec.value > 0 ? latencySec.value.toFixed(1) + ' s' : '—' },
-    { label: '往返时延', value: s && s.rttMs > 0 ? s.rttMs + ' ms' : '—' },
+    { label: '下载速率', value: s && s.downloadKbps > 0 ? formatKbps(s.downloadKbps) : '—' },
+    { label: '直播延迟', value: latencyText(s) },
+    { label: '缓冲余量', value: s && s.bufferMs > 0 ? s.bufferMs + ' ms' : '—' },
+  ]
+  // RTT / 抖动 / 丢包是 RTP 层面的指标，HLS 通道下根本拿不到，硬显示成「—」只会让人以为坏了。
+  if (mode.value === 'webrtc') {
+    rows.push(
+      { label: '往返时延', value: s && s.rttMs > 0 ? s.rttMs + ' ms' : '—' },
+      { label: '抖动', value: s && s.jitterMs > 0 ? s.jitterMs + ' ms' : '—' },
+      {
+        label: '丢包/丢帧',
+        value: s ? (s.lossRate > 0 ? (s.lossRate * 100).toFixed(2) + '%' : '0%') : '—',
+      },
+    )
+  }
+  rows.push(
     { label: '累计接收', value: s && s.receivedBytes > 0 ? formatBytes(s.receivedBytes) : '—' },
     { label: '解码帧', value: s && s.framesDecoded > 0 ? formatNumber(s.framesDecoded) : '—' },
-    { label: '连接状态', value: mode.value === 'hls' ? (phase.value === 'playing' ? '播放中' : '缓冲中') : labelOrDash(connState.value) },
-  ]
+    {
+      label: '连接状态',
+      value:
+        mode.value === 'hls'
+          ? phase.value === 'playing'
+            ? '播放中'
+            : '缓冲中'
+          : labelOrDash(connState.value),
+    },
+  )
+  return rows
 })
+
+/** 直播延迟优先用采样值，其次用实时量到的值。 */
+function latencyText(s: StatsSample | null): string {
+  const ms = s?.latencyMs ?? 0
+  if (ms > 0) return (ms / 1000).toFixed(1) + ' s'
+  if (latencySec.value > 0) return latencySec.value.toFixed(1) + ' s'
+  return '—'
+}
 
 function resolution(s: StatsSample | null): string {
   if (s && s.width && s.height) return s.width + '×' + s.height
@@ -167,7 +220,9 @@ function labelOrDash(value?: string | null): string {
 function valueOf(item: StatsSample, key: MetricKey): number {
   switch (key) {
     case 'kbps':
-      return item.videoKbps + item.audioKbps
+      return item.downloadKbps > 0 ? item.downloadKbps : item.videoKbps + item.audioKbps
+    case 'latency':
+      return item.latencyMs
     case 'fps':
       return item.fps
     case 'bufferMs':
@@ -186,6 +241,7 @@ function formatMetric(key: MetricKey, value: number): string {
   if (key === 'kbps') return formatKbps(value)
   if (key === 'fps') return value.toFixed(1) + ' fps'
   if (key === 'lossRate') return value.toFixed(2) + '%'
+  if (key === 'latency') return (value / 1000).toFixed(1) + ' s'
   return Math.round(value) + ' ms'
 }
 
@@ -206,6 +262,10 @@ function formatNumber(value: number): string {
 }
 
 function teardown(): void {
+  if (controlsTimer !== null) {
+    clearTimeout(controlsTimer)
+    controlsTimer = null
+  }
   if (monitorTimer !== null) {
     clearInterval(monitorTimer)
     monitorTimer = null
@@ -265,6 +325,13 @@ async function start(): Promise<void> {
   droppedTotal = 0
   latencySec.value = 0
   webrtcSince = 0
+  hlsBytes = 0
+  hlsVideoWindow = []
+  hlsAudioWindow = []
+  hlsLoads = []
+  lastCatchUp = 0
+  edgePos = 0
+  edgeAt = 0
 
   try {
     const data = await fetchPlay(props.room.username)
@@ -347,7 +414,7 @@ async function startHLS(token: number): Promise<void> {
     liveMaxLatencyDurationCount: 4,
     maxLiveSyncPlaybackRate: 1.5,
     backBufferLength: 10,
-    maxBufferLength: 6,
+    maxBufferLength: 4,
     enableWorker: true,
   })
   hls = instance as unknown as HlsHandle
@@ -369,6 +436,39 @@ async function startHLS(token: number): Promise<void> {
       return
     }
     fail('HLS 播放失败：' + data.details + '。' + noFrameHint(props.media, 'hls'))
+  })
+
+  // 分片下载完成才知道真实码率与下载速率：HLS 没有 RTCP，这些只能自己量。
+  instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+    const payload = data as unknown as {
+      frag?: { type?: string; duration?: number }
+      stats?: { loaded?: number; loading?: { start?: number; end?: number } }
+    }
+    const loaded = Number(payload.stats?.loaded ?? 0)
+    const duration = Number(payload.frag?.duration ?? 0)
+    if (loaded <= 0) return
+    hlsBytes += loaded
+    const start = Number(payload.stats?.loading?.start ?? 0)
+    const stop = Number(payload.stats?.loading?.end ?? 0)
+    if (stop > start && stop > 0) {
+      hlsLoads = [...hlsLoads, { bytes: loaded, ms: stop - start }].slice(-10)
+    }
+    if (duration <= 0) return
+    const entry = { bytes: loaded, duration }
+    if (payload.frag?.type === 'audio') hlsAudioWindow = [...hlsAudioWindow, entry].slice(-8)
+    else if (payload.frag?.type === 'video') hlsVideoWindow = [...hlsVideoWindow, entry].slice(-8)
+  })
+
+  // 清单每次刷新都记下直播边缘位置，用来算「画面离直播头还有多远」。
+  instance.on(Hls.Events.LEVEL_UPDATED, (_event, data) => {
+    const details = (data as unknown as { details?: { fragments?: { end?: number }[] } }).details
+    const fragments = details?.fragments ?? []
+    const last = fragments[fragments.length - 1]
+    const edge = Number(last?.end ?? 0)
+    if (edge > 0) {
+      edgePos = edge
+      edgeAt = Date.now()
+    }
   })
 
   instance.loadSource(url)
@@ -452,15 +552,24 @@ async function startWebRTC(token: number): Promise<void> {
 
 /** 采样一次“落后直播边缘多少秒”，供统计面板与追平按钮使用。 */
 function syncLatency(): void {
+  const video = videoEl.value
+  // 清单记录的直播边缘位置 + 经过的时间 = 此刻的直播头，减去播放位置就是真实延迟。
+  if (edgePos > 0 && edgeAt > 0 && video) {
+    const live = edgePos + (Date.now() - edgeAt) / 1000
+    const value = live - video.currentTime
+    if (Number.isFinite(value) && value >= 0 && value < 120) {
+      latencySec.value = value
+      return
+    }
+  }
   if (hls && typeof hls.latency === 'number' && Number.isFinite(hls.latency)) {
     latencySec.value = Math.max(0, hls.latency)
     return
   }
-  const video = videoEl.value
   if (!video || !video.seekable || video.seekable.length === 0) return
   const edge = video.seekable.end(video.seekable.length - 1)
-  const value = edge - video.currentTime
-  if (Number.isFinite(value) && value >= 0) latencySec.value = value
+  const fallbackValue = edge - video.currentTime
+  if (Number.isFinite(fallbackValue) && fallbackValue >= 0) latencySec.value = fallbackValue
 }
 
 /** 跳到直播边缘：hls.js 用它的 liveSyncPosition，原生播放器用 seekable 末端。 */
@@ -476,6 +585,15 @@ function seekLive(): void {
     const edge = video.seekable.end(video.seekable.length - 1)
     if (Number.isFinite(edge) && edge > 0) video.currentTime = Math.max(0, edge - 0.3)
   }
+}
+
+/** 落后直播边缘超过 1.8 秒就悄悄追上去（6 秒内最多一次，避免频繁跳导致卡顿）。 */
+function catchUp(): void {
+  if (phase.value !== 'playing' || latencySec.value <= 1.8) return
+  const now = Date.now()
+  if (now - lastCatchUp < 6000) return
+  lastCatchUp = now
+  seekLive()
 }
 
 function bufferedAhead(video: HTMLVideoElement | null): number {
@@ -510,6 +628,7 @@ async function sampleOnce(token: number): Promise<void> {
     }
   } else if (mode.value === 'hls') {
     syncLatency()
+    catchUp()
     next = hlsSample(now, sample.value)
   }
 
@@ -520,11 +639,37 @@ async function sampleOnce(token: number): Promise<void> {
   trackProgress(next, now)
 }
 
+/** 最近几个分片的 字节数 / 媒体时长 → 码率（kbps）。 */
+function windowBitrate(window: { bytes: number; duration: number }[]): number {
+  let bytes = 0
+  let duration = 0
+  for (const item of window) {
+    bytes += item.bytes
+    duration += item.duration
+  }
+  if (bytes <= 0 || duration <= 0) return 0
+  return Math.round((bytes * 8) / 1000 / duration)
+}
+
+/** 最近几次分片请求的 字节 / 耗时 → 真实下载速率（kbps）。 */
+function measuredDownloadKbps(): number {
+  let bytes = 0
+  let ms = 0
+  for (const item of hlsLoads) {
+    bytes += item.bytes
+    ms += item.ms
+  }
+  if (bytes <= 0 || ms <= 0) return 0
+  return Math.round((bytes * 8) / ms)
+}
+
 /**
- * HLS 没有 RTP 统计可读，只能从播放器侧推算：
- * - 下载速率取 hls.js 的带宽估算（也就是它实际测到的下载速度）；
- * - 帧率与丢帧取 <video> 的 getVideoPlaybackQuality；
- * - 缓冲延迟取已缓冲时长，它近似等于"落后直播头多少"。
+ * HLS 没有 RTP 统计可读，指标全部靠播放器侧推算：
+ * - 视频 / 音频码率：最近几个分片的字节数除以媒体时长；
+ * - 下载速率：分片请求的字节数除以 HTTP 加载耗时（与码率不是一回事）；
+ * - 累计接收：hls.js 加载过的分片字节数累加；
+ * - 帧率 / 丢帧：<video> 的 getVideoPlaybackQuality；
+ * - 直播延迟：清单里的直播边缘位置减去当前播放位置。
  */
 function hlsSample(now: number, prev: StatsSample | null): StatsSample {
   const s = emptySample(now)
@@ -536,9 +681,11 @@ function hlsSample(now: number, prev: StatsSample | null): StatsSample {
   s.width = video?.videoWidth ?? 0
   s.height = video?.videoHeight ?? 0
   s.bufferMs = Math.round(bufferedAhead(video) * 1000)
-
-  const estimate = hlsBandwidthKbps()
-  s.videoKbps = estimate
+  s.latencyMs = Math.round(latencySec.value * 1000)
+  s.videoKbps = windowBitrate(hlsVideoWindow)
+  s.audioKbps = windowBitrate(hlsAudioWindow)
+  s.downloadKbps = measuredDownloadKbps() || hlsBandwidthKbps()
+  s.receivedBytes = hlsBytes
 
   const quality = video?.getVideoPlaybackQuality?.()
   const total = Number(quality?.totalVideoFrames ?? 0)
@@ -555,8 +702,6 @@ function hlsSample(now: number, prev: StatsSample | null): StatsSample {
     s.lost = deltaDropped
     const seen = deltaFrames + deltaDropped
     s.lossRate = seen > 0 ? Math.min(1, deltaDropped / seen) : 0
-    // 没有 RTP 统计时，用带宽估算反推这段时间大致下载了多少字节。
-    s.receivedBytes = prev.receivedBytes + Math.round(((s.videoKbps * 1000) / 8) * seconds)
   }
 
   return s
@@ -641,6 +786,22 @@ function retry(): void {
   }, 300)
 }
 
+/** 鼠标 / 手指一动就重新计时；播放中静止 2.5 秒收起控制条。 */
+function pokeControls(): void {
+  controlsVisible.value = true
+  if (controlsTimer !== null) clearTimeout(controlsTimer)
+  controlsTimer = setTimeout(() => {
+    controlsTimer = null
+    if (phase.value === 'playing' && !showStats.value) controlsVisible.value = false
+  }, 2500)
+}
+
+function hideControls(): void {
+  if (controlsTimer !== null) clearTimeout(controlsTimer)
+  controlsTimer = null
+  if (phase.value === 'playing' && !showStats.value) controlsVisible.value = false
+}
+
 function toggleMute(): void {
   muted.value = !muted.value
   const video = videoEl.value
@@ -696,6 +857,19 @@ watch(
   { immediate: true },
 )
 
+// 播放开始就启动“静止 2.5 秒收控制条”的计时；一旦离开播放态，控制条常显。
+watch(phase, (value) => {
+  if (value === 'playing') {
+    pokeControls()
+    return
+  }
+  controlsVisible.value = true
+  if (controlsTimer !== null) {
+    clearTimeout(controlsTimer)
+    controlsTimer = null
+  }
+})
+
 watch(theater, (value) => {
   if (value) window.addEventListener('keydown', onKeydown)
   else window.removeEventListener('keydown', onKeydown)
@@ -715,8 +889,12 @@ onBeforeUnmount(() => {
     class="player"
     :class="['mode-' + mode, { 'is-theater': theater }]"
     @dblclick="onStageDoubleClick"
+    @mousemove="pokeControls"
+    @touchstart.passive="pokeControls"
+    @mouseleave="hideControls"
   >
-    <video ref="videoEl" class="video" playsinline autoplay :muted="muted" controls="false" />
+    <!-- 不写 controls：原生控件会和下面自绘的控制条叠在一起 -->
+    <video ref="videoEl" class="video" playsinline autoplay :muted="muted" />
 
     <div v-if="phase !== 'playing'" class="overlay">
       <template v-if="phase === 'connecting'">
@@ -755,7 +933,7 @@ onBeforeUnmount(() => {
       </button>
     </p>
 
-    <div class="controls">
+    <div v-show="controlsVisible || phase !== 'playing'" class="controls">
       <span class="live-chip"><i aria-hidden="true"></i>LIVE</span>
 
       <div v-if="hasModes" class="mode-switch" role="group" aria-label="播放通道">
@@ -828,7 +1006,7 @@ onBeforeUnmount(() => {
 
       <div class="chart-tabs">
         <button
-          v-for="tab in METRICS"
+          v-for="tab in metrics"
           :key="tab.key"
           type="button"
           class="chart-tab"
@@ -845,6 +1023,9 @@ onBeforeUnmount(() => {
           <dd>{{ row.value }}</dd>
         </template>
       </dl>
+      <p v-if="mode === 'hls'" class="stats-note">
+        HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「低延迟」通道。
+      </p>
     </div>
   </div>
 </template>
@@ -1033,6 +1214,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 10px 12px;
   background: linear-gradient(0deg, rgba(3, 6, 12, 0.9), rgba(3, 6, 12, 0));
+  transition: opacity 0.18s ease;
 }
 
 .live-chip {
@@ -1132,6 +1314,13 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line);
   background: rgba(6, 10, 16, 0.94);
   backdrop-filter: blur(6px);
+}
+
+.stats-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .chart-head {

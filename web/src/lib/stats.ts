@@ -25,6 +25,10 @@ export interface StatsSample {
   jitterMs: number
   /** 抖动缓冲的平均停留时间（毫秒），可近似看作播放端额外引入的延迟。 */
   bufferMs: number
+  /** 距直播边缘的延迟（毫秒）；HLS 由分片清单推算，WebRTC 拿不到时为 0。 */
+  latencyMs: number
+  /** 实测下载速率（kbps）；HLS 按分片请求耗时算，WebRTC 等于音视频码率之和。 */
+  downloadKbps: number
   /** 窗口内丢失的包数。 */
   lost: number
   /** 窗口内丢包率（0~1）。 */
@@ -59,6 +63,8 @@ export function emptySample(at = 0): StatsSample {
     rttMs: 0,
     jitterMs: 0,
     bufferMs: 0,
+    latencyMs: 0,
+    downloadKbps: 0,
     lost: 0,
     lossRate: 0,
     framesDecoded: 0,
@@ -168,6 +174,7 @@ export function collectSample(items: StatEntry[], at: number, prev?: StatsSample
       sample.fps = Math.max(0, Math.round(((sample.framesDecoded - prev.framesDecoded) / seconds) * 10) / 10)
     }
     sample.lost = Math.max(0, packetsLost - prev.lostTotal)
+    sample.downloadKbps = sample.videoKbps + sample.audioKbps
     const receivedDelta = Math.max(0, packetsReceived - prev.receivedPackets)
     const total = receivedDelta + sample.lost
     sample.lossRate = total > 0 ? sample.lost / total : 0
