@@ -7,10 +7,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +23,7 @@ import (
 	"tinycast/internal/httpapi"
 	"tinycast/internal/hub"
 	"tinycast/internal/janitor"
+	"tinycast/internal/logfile"
 	"tinycast/internal/srsapi"
 )
 
@@ -31,11 +36,38 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", "", "HTTP 监听地址，覆盖环境变量 HTTP_ADDR")
+	envFile := flag.String("config", os.Getenv("TINYCAST_ENV"), "环境变量文件（KEY=VALUE），默认读取 TINYCAST_ENV")
 	open := flag.Bool("open", false, "启动后用默认浏览器打开首页")
+	version := flag.Bool("version", false, "打印版本信息后退出")
 	flag.Parse()
 
-	logger := newLogger()
+	if *version {
+		fmt.Println(buildVersion())
+		return nil
+	}
+
+	// 配置文件必须先加载：LOG_FILE、LOG_LEVEL 等日志开关也在其中。
+	envVars := 0
+	if *envFile != "" {
+		n, err := config.LoadEnvFile(*envFile)
+		if err != nil {
+			return err
+		}
+		envVars = n
+	}
+
+	logger, logCloser, err := newLogger()
+	if err != nil {
+		return err
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
 	slog.SetDefault(logger)
+
+	if *envFile != "" {
+		logger.Info("已加载配置文件", "path", *envFile, "vars", envVars)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -120,7 +152,41 @@ func run() error {
 	return nil
 }
 
-func newLogger() *slog.Logger {
+// buildVersion 返回用于运维排查的版本串，例如
+// v0.1.0 (rev a1b2c3d, dirty) 或 go1.27.3 (从源码构建，无版本信息)。
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "tinycast (unknown build)"
+	}
+	var rev, dirty, when string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = ", dirty"
+			}
+		case "vcs.time":
+			when = s.Value
+		}
+	}
+	name := info.Main.Version
+	if name == "" || name == "(devel)" {
+		name = "tinycast"
+	}
+	if rev == "" {
+		return fmt.Sprintf("%s (%s)", name, info.GoVersion)
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	return fmt.Sprintf("%s (rev %s%s, %s, %s)", name, rev, dirty, when, info.GoVersion)
+}
+
+// newLogger 构造日志器：默认写标准输出，配置了 LOG_FILE 时同时按大小滚动落盘。
+func newLogger() (*slog.Logger, io.Closer, error) {
 	level := slog.LevelInfo
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
 	case "debug":
@@ -130,5 +196,32 @@ func newLogger() *slog.Logger {
 	case "error":
 		level = slog.LevelError
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+
+	var out io.Writer = os.Stdout
+	var closer io.Closer
+	if path := strings.TrimSpace(os.Getenv("LOG_FILE")); path != "" {
+		w, err := logfile.New(logfile.Options{
+			Path:     path,
+			MaxBytes: envInt64("LOG_MAX_MB", 16) << 20,
+			Keep:     int(envInt64("LOG_KEEP", 3)),
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		out = io.MultiWriter(os.Stdout, w)
+		closer = w
+	}
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level})), closer, nil
+}
+
+func envInt64(key string, def int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }
