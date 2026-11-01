@@ -3,7 +3,7 @@
 #
 # 用法：
 #   ./scripts/build.sh                       # 构建本机平台到 bin/
-#   ./scripts/build.sh --windows             # 交叉编译 Windows 免安装包到 bin/windows-amd64/
+#   ./scripts/build.sh --windows             # 交叉编译 Windows 生产运行包到 bin/windows-amd64/
 #   GOOS=linux GOARCH=arm64 ./scripts/build.sh  # 其它平台交叉编译
 #   SKIP_WEB=1 ./scripts/build.sh            # 只构建后端（前端产物已存在时）
 set -euo pipefail
@@ -49,14 +49,32 @@ if [[ "${GOOS:-}" == "windows" ]]; then
   SUFFIX=".exe"
   OUTDIR="bin/windows-amd64"
   mkdir -p "$OUTDIR"
+  # 清掉上一次生成的顶层文件；srs/ 与 logs/ 原样保留，避免重复下载 42MB 的 SRS
+  rm -f "$OUTDIR"/*.exe "$OUTDIR"/*.cmd "$OUTDIR"/*.txt "$OUTDIR"/*.env
 fi
 
 echo "==> 构建后端 ${GOOS:-本机}/${GOARCH:-本机}"
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinycast$SUFFIX" ./cmd/tinycast
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinysim$SUFFIX" ./cmd/tinysim
 
 if [[ "$OUTDIR" == "bin/windows-amd64" ]]; then
-  cp deploy/windows/start-tinycast.cmd deploy/windows/simulate-srs.cmd deploy/windows/使用说明.txt "$OUTDIR/"
+  # Windows 生产运行包：可执行文件 + 配置文件 + 启动脚本 + 说明，SRS 由 fetch-srs-windows.sh 放入 srs/
+  cp deploy/windows/tinycast.env deploy/windows/start.cmd deploy/windows/start-all.cmd \
+    deploy/windows/部署说明.txt "$OUTDIR/"
+  mkdir -p "$OUTDIR/logs" "$OUTDIR/srs/conf"
+  if [[ -f deploy/srs/srs.windows.conf ]]; then
+    cp deploy/srs/srs.windows.conf "$OUTDIR/srs/conf/srs.conf"
+  fi
+  if [[ ! -f "$OUTDIR/srs/objs/srs.exe" ]]; then
+    echo "提示：尚未放入 SRS，运行 ./scripts/fetch-srs-windows.sh 之后才可做真实推流"
+  fi
+
+  # 模拟回调的联调工具不进生产包，单独放在 bin/dev 下备用
+  echo "==> 构建联调工具 tinysim"
+  mkdir -p bin/dev
+  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "bin/dev/tinysim$SUFFIX" ./cmd/tinysim
+else
+  echo "==> 构建联调工具 tinysim"
+  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinysim$SUFFIX" ./cmd/tinysim
 fi
 
 echo "==> 完成：$OUTDIR"

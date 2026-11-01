@@ -42,7 +42,8 @@ SRS 与 Go 后端可在同一台服务器上，通过 http_hooks 与 HTTP API �
 ```
 cmd/tinycast/            程序入口（信号处理、HTTP 服务、优雅退出）
 cmd/tinysim/             联调工具：用 HTTP 请求模拟 SRS 的四个回调（不含业务逻辑）
-internal/config/         环境变量配置
+internal/config/         配置加载（环境变量 + KEY=VALUE 配置文件）
+internal/logfile/        按大小滚动的日志写入器
 internal/hub/            内存状态中心：推流鉴权、房间生命周期、观看会话、SSE 广播
 internal/httpapi/        HTTP 路由、SSE、SRS 回调、中间件
 internal/srsapi/         SRS HTTP API 客户端（客户端列表核对）
@@ -51,8 +52,8 @@ internal/webui/          前端产物嵌入与 SPA 回退
 web/                     Vue 3 + TypeScript + Vite 前端
 deploy/srs/srs.conf      SRS 6 配置（RTMP + WebRTC + 回调）
 deploy/systemd/          Linux systemd 单元与环境变量样例
-deploy/windows/          Windows 构建/启动脚本与双击启动的 cmd
-scripts/                 构建与开发脚本
+deploy/windows/          Windows 生产运行包：env 配置、启动脚本、部署说明
+scripts/                 构建、开发与 SRS 下载脚本
 ```
 
 ## 快速开始（Docker Compose）
@@ -83,45 +84,49 @@ SRS 侧：把 deploy/srs/srs.conf 中四个回调地址里的 tinycast 换成 12
 
 ### Windows
 
+Windows 侧推荐直接使用下面「Windows 生产运行包」，它把二进制、配置、启动脚本和 SRS 放在一起，
+复制到目标机器就能跑。如果机器上已经装好 Go 与 Node，也可以就地构建：
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\build.ps1
-powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1
+powershell -ExecutionPolicy Bypass -File deploy\windows\build.ps1   # 构建 bin\tinycast.exe
+powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1     # 读取 tinycast.env 启动
 ```
 
-SRS 使用官方 Windows 版本 srs.exe -c conf\srs.conf，并把回调地址改为 127.0.0.1:8080。
+### Windows 生产运行包（自带 SRS 6）
 
-### Windows 免安装体验包
-
-没有 Go、Node、Docker、SRS 的 Windows 机器也能跑起来，只需要两个 exe（前端已内嵌进可执行文件）：
+Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编译，产出一个可整目录拷走的运行包——前端已内嵌进 `tinycast.exe`，SRS 6 以官方 Windows 构建的形式放在 `srs/` 子目录里。
 
 ```bash
-./scripts/build.sh --windows     # 或在 WSL/Linux 上显式交叉编译（见下）
-cd bin/windows-amd64 && ls
-# tinycast.exe  tinysim.exe  start-tinycast.cmd  simulate-srs.cmd  使用说明.txt
+./scripts/build.sh --windows     # 交叉编译 tinycast.exe，并生成包内配置与启动脚本
+./scripts/fetch-srs-windows.sh   # 放入 SRS 6 官方 Windows 构建（约 42MB，不入库）
 ```
 
-交叉编译命令（在 Linux/WSL 上执行，产物可直接拷贝到 Windows）：
+产物 `bin/windows-amd64/`：
 
-```bash
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/windows-amd64/tinycast.exe ./cmd/tinycast
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/windows-amd64/tinysim.exe ./cmd/tinysim
-```
-
-在 Windows 上双击 start-tinycast.cmd 会启动服务并自动打开首页；双击 simulate-srs.cmd 会用 tinysim 依次模拟「推流 → 重复推流被拒 → 观众进出 → 断流保留 → 重新推流」，每步回读 `/api/rooms/:username` 打印真实状态。
-
-tinysim 只是把 SRS 会发的 HTTP 回调手工发一遍，它不参与业务逻辑：
-
-| 子命令 | 作用 |
+| 文件 | 作用 |
 | --- | --- |
-| `demo` | 完整走一遍生命周期（默认每步停留 4s，`-step 0` 可关闭等待） |
-| `publish` / `unpublish` | 模拟 OBS 开始 / 停止推流 |
-| `play` / `stop` | 模拟一个观众进入 / 离开 |
-| `state` | 查询房间当前状态 |
-| `token` | 打印一份可直接粘贴到 OBS 的推流配置 |
+| `tinycast.exe` | 业务后端，前端页面已内嵌，单文件即可运行 |
+| `tinycast.env` | 全部运行配置（KEY=VALUE，逐项带注释），由 `-config` 读取 |
+| `start-all.cmd` | 生产启动：先拉起 SRS，再启动 tinycast 并打开首页 |
+| `start.cmd` | 只启动 tinycast（SRS 在别处时用），可传参如 `start.cmd -open` |
+| `srs/objs/srs.exe` | SRS 6.0.172 官方 Cygwin 构建，附 cygwin1.dll 等三个依赖 |
+| `srs/conf/srs.conf` | 由 [deploy/srs/srs.windows.conf](deploy/srs/srs.windows.conf) 复制，四个回调指向 `http://127.0.0.1:8080/internal/srs/*` |
+| `logs/`、`srs/logs/` | 运行日志目录，tinycast 日志默认 16MB 滚动、保留 3 份 |
+| `部署说明.txt` | 目录说明、上机步骤、局域网/HTTPS 改造、排查表 |
 
-常用参数：`-base http://127.0.0.1:8080`、`-user alex`、`-room 演示直播间`、`-token <令牌>`、`-secret <回调密钥>`、`-client <客户端ID>`。
+上机步骤：
 
-注意：体验包里没有 SRS，房间详情页的播放器会连不上 WebRTC 信令并显示失败提示，这是预期现象；要看到真实画面仍需在本机或内网另跑 SRS 6。
+1. 把整个 `bin/windows-amd64/` 目录拷到 Windows 机器（例如 `D:\tinycast`）；
+2. 双击 `start-all.cmd`：弹出 SRS 窗口，当前窗口运行 tinycast，浏览器自动打开 http://127.0.0.1:8080 ；
+3. 首页「创建推流配置」→ 得到服务器地址 `rtmp://127.0.0.1:1935/live` 与推流码 `alex?room=房间名&token=<令牌>`；
+4. OBS → 设置 → 直播 → 服务选「自定义」，填入两项后开始推流；
+5. 首页立刻出现 LIVE 房间，点进去看 WebRTC 画面，在线人数随观看者增减；OBS 停止推流后房间进入 GRACE 并倒计时，5 分钟内重推恢复 LIVE，超时释放。
+
+局域网/公网观看：把 `srs/conf/srs.conf` 的 `candidate 127.0.0.1` 改成对内/对外的 IP 或域名，`tinycast.env` 里同步 `SRS_RTMP_PUBLIC_BASE`、`SRS_WEBRTC_PUBLIC_BASE`、`PUBLIC_BASE_URL`，并放通 TCP 1935、TCP 8080（或 80/443）、UDP 8000。端口分工：1935/tcp RTMP、1985/tcp SRS HTTP API（仅本机）、8000/udp WebRTC、8080/tcp 页面与接口。
+
+长期运行：`tinycast.exe` 是控制台程序，Ctrl+C 即优雅停止；需要开机自启/崩溃重启时用「任务计划程序」触发 `start-all.cmd`，或用 NSSM / WinSW 把 `tinycast.exe` 注册成服务。
+
+SRS 的 Windows 构建取自官方 Release `v6.0-b0` 的 NSIS 安装包（sha256 固定在 [scripts/fetch-srs-windows.sh](scripts/fetch-srs-windows.sh) 中，脚本只解包，不运行安装程序、不写注册表）。SRS 官方把 Windows 版定位为测试用途，长期高负载生产建议用 Linux 版与 [deploy/srs/srs.conf](deploy/srs/srs.conf)。
 
 ## OBS 推流配置
 
@@ -184,6 +189,10 @@ curl -N http://127.0.0.1:8080/api/events      # 持续接收快照
 | --- | --- | --- |
 | HTTP_ADDR | :8080 | 监听地址 |
 | LOG_LEVEL | info | debug / info / warn / error |
+| LOG_FILE | 空 | 日志文件路径，设置后按大小滚动落盘（目录自动创建） |
+| LOG_MAX_MB | 16 | 单个日志文件上限（MB） |
+| LOG_KEEP | 3 | 保留的历史日志份数 |
+| TINYCAST_ENV | 空 | 默认读取的配置文件路径，等价于 `-config` |
 | ROOM_GRACE | 5m | 断流保留时长，支持 300（秒）或 5m |
 | JANITOR_INTERVAL | 15s | 定时清理任务间隔 |
 | SRS_APP | live | SRS 应用名，需与推流地址中的 /live 一致 |
@@ -198,6 +207,13 @@ curl -N http://127.0.0.1:8080/api/events      # 持续接收快照
 | SRS_CLIENTS_API_USER / SRS_CLIENTS_API_PASSWORD | 空 | 访问 SRS HTTP API 的 BasicAuth |
 | CORS_ALLOWED_ORIGINS | 空 | 前后端不同源时的允许来源 |
 | PUBLIC_BASE_URL | 空 | 对外访问地址（用于生成绝对链接） |
+
+后端支持用配置文件代替环境变量，方便 Windows 与系统服务部署：
+
+```bash
+tinycast -config tinycast.env   # KEY=VALUE，已存在的环境变量优先
+tinycast -version               # 打印版本与提交号
+```
 
 ## 本地开发
 
@@ -226,6 +242,23 @@ curl -X POST http://127.0.0.1:8080/internal/srs/on_play \
   -H 'Content-Type: application/json' \
   -d '{"client_id":"v1","app":"live","stream":"alex"}'
 ```
+
+更省事的方式是用 [cmd/tinysim](cmd/tinysim)（仅开发用，不进生产包，构建产物在 `bin/dev/`）：它把 SRS 会发的回调手工发一遍，不参与业务逻辑。
+
+```bash
+go run ./cmd/tinysim demo -step 0            # 推流 → 重复推流被拒 → 观众进出 → 断流保留 → 重新推流
+go run ./cmd/tinysim token -user alex        # 打印一份可直接粘贴到 OBS 的推流配置
+```
+
+| 子命令 | 作用 |
+| --- | --- |
+| `demo` | 完整走一遍生命周期（默认每步停留 4s，`-step 0` 关闭等待） |
+| `publish` / `unpublish` | 模拟 OBS 开始 / 停止推流 |
+| `play` / `stop` | 模拟一个观众进入 / 离开 |
+| `state` | 查询房间当前状态 |
+| `token` | 打印一份可直接粘贴到 OBS 的推流配置 |
+
+常用参数：`-base http://127.0.0.1:8080`、`-user alex`、`-room 演示直播间`、`-token <令牌>`、`-secret <回调密钥>`、`-client <客户端ID>`。这种方式没有媒体流，播放器会显示连接失败，属预期现象。
 
 ## 设计取舍
 

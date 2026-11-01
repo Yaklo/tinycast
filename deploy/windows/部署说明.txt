@@ -1,0 +1,82 @@
+轻量级直播推流平台 TinyCast —— Windows 生产运行包
+=====================================================
+
+一、目录说明
+  tinycast.exe        业务后端（Vue 前端已内嵌，单文件即可运行）
+  tinycast.env        全部运行配置（KEY=VALUE，逐项都有注释）
+  start-all.cmd       启动 SRS + TinyCast（生产环境用这个）
+  start.cmd           只启动 TinyCast（SRS 已在别处运行时用）
+  srs\objs\srs.exe    SRS 6.0.172 官方 Windows 构建
+  srs\objs\*.dll     SRS 依赖的 Cygwin 运行库，必须与 srs.exe 同目录
+  srs\conf\srs.conf  SRS 配置（四个回调指向 http://127.0.0.1:8080/internal/srs/*）
+  srs\logs\srs.log   SRS 运行日志（由启动脚本重定向生成）
+  logs\tinycast.log  TinyCast 日志（默认 16MB 滚动，保留 3 份）
+
+二、首次运行（本机自测）
+  1. 双击 start-all.cmd。会看到两个窗口：
+       「TinyCast - SRS 6」：媒体服务器（1935/tcp、1985/tcp、8000/udp）
+       当前窗口：TinyCast 后端，浏览器随后自动打开 http://127.0.0.1:8080/
+  2. 首页点「创建推流配置」，填用户名（例如 alex）和房间名称，复制生成的推流码。
+     令牌由浏览器用 crypto.getRandomValues() 生成，不会上传到服务器，请自行保存。
+  3. OBS → 设置 → 直播 → 服务选「自定义」：
+       服务器：rtmp://127.0.0.1:1935/live
+       推流码：alex?room=房间名称&token=生成的令牌
+     然后点「开始推流」。
+  4. 首页立刻出现该房间（状态 LIVE），点进去就能看到 WebRTC 画面，并显示在线观看人数。
+  5. OBS 点「停止推流」→ 房间变「断流保留中」并开始 5 分钟倒计时；
+     5 分钟内用同一用户名和令牌重推会恢复 LIVE，超时后房间自动释放并从首页消失。
+
+三、改为局域网 / 公网访问
+  1. srs\conf\srs.conf 中 rtc_server 的 candidate 改成对外地址：
+       candidate 192.168.1.10;            局域网
+       candidate live.example.com;        域名（需公网可解析）
+  2. tinycast.env 中把对外地址填上：
+       SRS_RTMP_PUBLIC_BASE=rtmp://<对外地址>:1935/live
+       SRS_WEBRTC_PUBLIC_BASE=webrtc://<对外地址>:1935/live
+       PUBLIC_BASE_URL=https://<对外地址>          （启用 HTTPS 时填写）
+  3. Windows 防火墙放通：
+       TCP 1935   OBS 推流（RTMP）
+       TCP 8080   页面与接口（若用 80/443 反代则放通对应端口）
+       UDP 8000   WebRTC 媒体，浏览器观看必需
+  4. 生产建议在前面加 Caddy / Nginx 做 HTTPS 反向代理到 127.0.0.1:8080。
+     注意：反代必须拒绝 /internal/ 路径（那是 SRS 回调），否则任何人只要伪造 POST
+     就能创建房间；不放心的话再设置 SRS_CALLBACK_SECRET，并同步修改
+     srs\conf\srs.conf 中四个回调地址加上 ?secret=<同一个值>。
+
+四、配置文件说明（tinycast.env）
+  常用项：
+    HTTP_ADDR              监听地址，默认 :8080
+    PUBLIC_BASE_URL        对外地址，用于拼装返回给浏览器的绝对地址
+    LOG_LEVEL/LOG_FILE     info、logs\tinycast.log（按 LOG_MAX_MB 滚动，保留 LOG_KEEP 份）
+    ROOM_GRACE             断流保留时长，需求固定为 5m
+    JANITOR_INTERVAL       清理任务间隔，默认 15s
+    SRS_APP                SRS 应用名（RTMP 地址里的 /live 段）
+    SRS_RTMP_PUBLIC_BASE   展示给 OBS 的服务器地址
+    SRS_RTC_PROXY_TARGET   后端把 /rtc/* 反代到 SRS 的 HTTP API
+    SRS_CLIENTS_API_URL    定时向 SRS 核对在线客户端，修复丢失的回调
+    SRS_CALLBACK_ALLOWED_CIDRS  允许发起回调的来源网段（公网 IP 一律拒绝）
+  命令行参数优先于文件，例如：
+    tinycast.exe -config tinycast.env -addr :9000
+    tinycast.exe -version        查看版本
+
+五、长期运行
+  - 本程序是控制台程序：Ctrl+C 或关闭窗口即停止服务，退出时会优雅关闭，
+    所有房间与身份绑定都随内存清空，这是本项目的设计取舍。
+  - 需要开机自启 / 崩溃重启时，用「任务计划程序」把 start-all.cmd 设为登录或开机触发，
+    或用 NSSM / WinSW 之类的工具把 tinycast.exe 注册成 Windows 服务。
+  - 两个窗口可以分别关闭：关掉 SRS 窗口只会断流（房间进入 5 分钟保留期）。
+
+六、排查
+  - 首页没有房间：先看 logs\tinycast.log 有没有「推流开始」；OBS 侧连不上就看 srs\logs\srs.log。
+  - OBS 推流被拒（StConnect 失败）：同一用户名+令牌已有一路推流，或令牌与他人用户名冲突；
+    换一份配置，或等原身份 5 分钟释放后再推。
+  - 能进房间但画面黑：UDP 8000 未放通，或 candidate 不是浏览器可达的地址。
+  - 人数一直是 0：确认 srs\conf\srs.conf 的 http_hooks 指向 127.0.0.1:8080，且 TinyCast 已启动。
+  - 想确认链路是否通：curl http://127.0.0.1:8080/api/healthz 与
+    curl http://127.0.0.1:1985/api/v1/versions 都应返回 JSON。
+
+七、版本与来源
+  tinycast.exe -version 可查看构建版本与提交号。
+  SRS 侧为 6.0.172，取自 ossrs/srs 的 Release v6.0-b0 Windows 安装包（sha256 见仓库
+  scripts/fetch-srs-windows.sh）；SRS 官方把 Windows 版定位为测试用途，
+  真正的生产部署建议用 Linux 版 SRS，配置见仓库 deploy/srs/srs.conf。

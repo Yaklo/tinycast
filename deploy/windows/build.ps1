@@ -1,5 +1,7 @@
-# 在 Windows 上构建 TinyCast（需要 Go 1.24+、Node 22+、pnpm）
+# 在 Windows 上就地构建 TinyCast（需要 Go 1.24+、Node 22+、pnpm）
 # 用法： powershell -ExecutionPolicy Bypass -File deploy\windows\build.ps1
+# 产物： bin\tinycast.exe（前端已内嵌）。
+# 只想要开箱即用的运行包时，在 Linux/WSL 侧执行 ./scripts/build.sh --windows 更省事。
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
