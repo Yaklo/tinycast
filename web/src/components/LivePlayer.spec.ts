@@ -151,6 +151,7 @@ beforeEach(() => {
   hlsLog.attachMedia = 0
   hlsLog.destroyed = 0
   FakePeerConnection.instances = []
+  localStorage.clear()
   vi.stubGlobal('RTCPeerConnection', FakePeerConnection)
   vi.stubGlobal(
     'fetch',
@@ -221,6 +222,24 @@ describe('LivePlayer', () => {
     expect(fetchPlayMock).toHaveBeenCalledTimes(2)
     expect(wrapper.findAll('.mode-btn')[1].classes()).toContain('active')
     expect(wrapper.find('.stats-grid').exists() || true).toBe(true)
+  })
+
+  it('记住上次选择的通道', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls', true))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const lowLatency = wrapper.findAll('.mode-btn').find((node) => node.text() === '低延迟')
+    await lowLatency?.trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem('tinycast.playMode')).toBe('webrtc')
+
+    fetchPlayMock.mockResolvedValue(playResponse('webrtc'))
+    const second = mountPlayer()
+    await flushPromises()
+
+    expect(second.findAll('.mode-btn')[1].classes()).toContain('active')
   })
 
   it('网页全屏会锁住页面滚动，按 Esc 恢复', async () => {

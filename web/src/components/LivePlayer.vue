@@ -29,7 +29,26 @@ const errorText = ref('')
 const overlayNote = ref('')
 const stallNote = ref('')
 const connState = ref('')
-const mode = ref<PlayMode>('hls')
+const MODE_KEY = 'tinycast.playMode'
+
+/** 记住用户上次选的通道；没选过就用默认的 HLS（有声音、支持 H.265 与 B 帧）。 */
+function loadMode(): PlayMode {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'webrtc' ? 'webrtc' : 'hls'
+  } catch {
+    return 'hls'
+  }
+}
+
+function saveMode(next: PlayMode): void {
+  try {
+    localStorage.setItem(MODE_KEY, next)
+  } catch {
+    // 隐私模式下 localStorage 不可写，忽略即可
+  }
+}
+
+const mode = ref<PlayMode>(loadMode())
 const playback = ref<Playback | null>(null)
 
 const muted = ref(true)
@@ -516,6 +535,7 @@ function armWatchdog(token: number): void {
 function switchMode(next: PlayMode): void {
   if (next === mode.value) return
   mode.value = next
+  saveMode(next)
   if (props.room.state === 'LIVE') void start()
 }
 
