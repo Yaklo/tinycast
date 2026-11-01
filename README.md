@@ -46,18 +46,37 @@
 
 两个进程可以同机也可以容器编排。浏览器全程只访问 18855，媒体端口无需对外暴露（WebRTC 的 UDP 8000 除外）。
 
-## 快速开始（Docker）
+## 快速开始
+
+三种方式任选一种，Windows 最省事。
+
+### 1. Windows（推荐）
+
+1. 拿到 `tinycast-<版本>-windows-amd64.zip`（发布包，见下文「发布与版本」），解压到本地磁盘；
+2. 右键 `open-firewall.cmd` → 以管理员身份运行，放通端口（只需一次）；
+3. 双击 `start-all.cmd`，浏览器自动打开 <http://127.0.0.1:18855>。
+
+接着在首页点「创建推流配置」，把生成的服务器地址与推流码整段粘进 OBS 就能开播。
+
+### 2. Linux
 
 ```bash
-# 1. 改一下对外地址（可选，局域网/公网访问时填服务器 IP 或域名）
-cp .env.example .env
-# 2. 起服务
-docker compose up -d --build
-# 3. 打开 http://<服务器地址>:18855
+tar -xzf tinycast-v0.1.0-linux-amd64.tar.gz
+cd tinycast-v0.1.0-linux-amd64
+./start.sh          # MediaMTX 与 TinyCast 一起跑，Ctrl+C 退出
 ```
 
-正式部署记得改 `deploy/mediamtx/mediamtx.docker.yml` 里的 `webrtcAdditionalHosts` 与 compose 里的
-`MEDIAMTX_RTMP_PUBLIC_BASE`，否则观众拿到的候选地址仍是 `127.0.0.1`。
+### 3. Docker
+
+```bash
+cp .env.example .env       # 可选：填对外 IP 或域名
+docker compose up -d --build
+```
+
+浏览器访问 `http://<服务器地址>:18855`。
+
+> 对外提供服务时，把 `webrtcAdditionalHosts` 与 `MEDIAMTX_RTMP_PUBLIC_BASE` 改成真实地址，
+> 并放通 TCP 1935 / 18855 与 UDP 8000。
 
 ## 发布与版本
 
@@ -77,7 +96,7 @@ docker compose up -d --build
 查询版本：
 
 ```bash
-./tinycast -version     # v0.1.0 (rev b6da756, 2026-11-02T03:00:00Z, go1.24.7)
+./tinycast -version     # v0.1.0 (rev a0a1c5c, 2026-11-01T19:34:13Z, go1.27.3)
 curl -s localhost:18855/api/version
 ```
 
@@ -86,8 +105,7 @@ Docker 镜像里没有 `.git`，版本由 compose 的 `TINYCAST_VERSION` / `TINY
 
 ## 手动部署（Linux）
 
-想省事可以直接用发布包：`tinycast-<版本>-linux-amd64.tar.gz` 解压后 `./start.sh`，
-里面已经带了 MediaMTX、配置样例与 systemd 单元。下面是从源码手工部署的步骤。
+发布包里已经带了 MediaMTX、配置样例与 systemd 单元（解压后 `./start.sh`）。下面是从源码手工部署的步骤。
 
 ```bash
 # MediaMTX：官方单文件程序
@@ -109,14 +127,14 @@ sudo systemctl daemon-reload && sudo systemctl enable --now mediamtx tinycast
 
 改 `/etc/tinycast/tinycast.env` 后 `sudo systemctl restart tinycast` 生效。
 
-## Windows 运行包
+## 打包 Windows 运行包
 
 ```bash
 ./scripts/package-windows.sh     # 产出 dist/tinycast-<版本>-windows-amd64.zip（含 mediamtx.exe）
 ```
 
-解压后右键 `open-firewall.cmd` → 以管理员身份运行，再双击 `start-all.cmd`，浏览器会自动打开。
-详细步骤见包内 `部署说明.txt`。
+包内是免安装的完整运行环境（TinyCast + MediaMTX），用法见上面的快速开始；
+详细步骤与排查见包内 `部署说明.txt`。
 
 ## OBS 配置
 
