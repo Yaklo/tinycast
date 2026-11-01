@@ -168,17 +168,22 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
       HLS 不读 LL-HLS 分片）；看 H.265 时不要改，Safari 的 MSE 只解 H.264。
 
   ⑥ 想看更详细的日志
-     默认控制台只打印报错，完整日志在 logs\tinycast.log；
-     想看每一步在做什么，把 tinycast.env 的 LOG_LEVEL 改成 debug 再重启；
-     MediaMTX 的日志在 logs\mediamtx.log，或直接看它的窗口。
+     控制台与 logs\tinycast.log 默认内容一致（按 LOG_MAX_MB 自动滚动，保留 LOG_KEEP 份）；
+     只想看报错就在 tinycast.env 设 LOG_CONSOLE_LEVEL=error；
+     想看每一步在做什么，把 LOG_LEVEL 改成 debug 再重启；
+     MediaMTX 的日志在 logs\mediamtx.log（每次启动超过 16 MB 会换新文件，保留三份），
+     或直接看它的窗口。
 
 
 八、安全提醒
 
-  - 回调接口 /internal/mtx/auth 默认只接受本机与内网来源；
-    如果 tinycast 前面有反向代理，请把 MEDIAMTX_AUTH_ALLOWED_CIDRS 收窄到
-    代理与 MediaMTX 的地址。
-    想再加一层：tinycast.env 设 MEDIAMTX_AUTH_SECRET=一串随机值，并把
+  - 回调接口 /internal/mtx/auth 默认只接受本机来源（127.0.0.1）。
+    只有把 tinycast 与 MediaMTX 放进不同容器时才需要放宽
+    MEDIAMTX_AUTH_ALLOWED_CIDRS，填 MediaMTX 所在的容器网段。
+  - 如果 tinycast 前面还有 nginx / Caddy 之类的反向代理：
+    把 TRUSTED_PROXIES 设成代理的地址（默认只有本机），并在代理上直接拒绝
+    /internal/ 路径；这样公网请求不会落到鉴权回调上。
+    再加一层：tinycast.env 设 MEDIAMTX_AUTH_SECRET=一串随机值，并把
     mediamtx\mediamtx.yml 的 authHTTPAddress 改成
     http://127.0.0.1:18855/internal/mtx/auth?secret=同一个值 。
   - 推流令牌只在浏览器里生成，服务端只存 SHA-256 哈希，不会出现在房间列表里。

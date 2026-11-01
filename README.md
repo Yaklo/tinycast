@@ -29,8 +29,8 @@
 ### 2. Linux
 
 ```bash
-tar -xzf tinycast-v0.1.0-linux-amd64.tar.gz
-cd tinycast-v0.1.0-linux-amd64
+tar -xzf tinycast-*-linux-amd64.tar.gz
+cd tinycast-*-linux-amd64
 ./start.sh          # MediaMTX 与 TinyCast 一起跑，Ctrl+C 退出
 ```
 
@@ -74,7 +74,7 @@ docker compose up -d --build
    │                        auth 回调（publish / read）
    ▼                                      ▼
                       Go 后端 tinycast :18855
-                      ├── /internal/mtx/auth  推流鉴权（仅内网）
+                      ├── /internal/mtx/auth  推流鉴权（仅本机）
                       ├── 轮询 /v3/paths/list 判断推流开/停 → 房间状态
                       ├── /api/*              房间、配置、心跳
                       ├── /api/events         SSE 快照推送
@@ -104,7 +104,7 @@ docker compose up -d --build
 查询版本：
 
 ```bash
-./tinycast -version     # v0.1.0 (rev a0a1c5c, 2026-11-01T19:34:13Z, go1.27.3)
+./tinycast -version     # 例如 v0.1.0 (rev 6cca1d2, 2026-11-01T20:20:26Z, go1.27.3)；非 tag 提交会带 -N-g<sha> 后缀
 curl -s localhost:18855/api/version
 ```
 
@@ -119,7 +119,7 @@ Docker 镜像里没有 `.git`，版本由 compose 的 `TINYCAST_VERSION` / `TINY
 # MediaMTX：官方单文件程序
 curl -L -o /tmp/mtx.tar.gz https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_amd64.tar.gz
 sudo tar -xzf /tmp/mtx.tar.gz -C /usr/local/bin mediamtx
-sudo install -d /etc/mediamtx && sudo install -m 640 deploy/mediamtx/mediamtx.yml /etc/mediamtx/mediamtx.yml
+sudo install -d /etc/mediamtx && sudo install -m 644 deploy/mediamtx/mediamtx.yml /etc/mediamtx/mediamtx.yml
 
 # TinyCast：自带前端
 ./scripts/build.sh
@@ -130,6 +130,7 @@ sudo install -d /etc/tinycast && sudo install -m 640 deploy/systemd/tinycast.env
 sudo install -m 644 deploy/systemd/mediamtx.service deploy/systemd/tinycast.service /etc/systemd/system/
 sudo useradd -r -s /usr/sbin/nologin mediamtx -d /var/lib/mediamtx   # 首次
 sudo useradd -r -s /usr/sbin/nologin tinycast
+sudo install -d -o tinycast -g tinycast /var/log/tinycast            # systemd 的 ReadWritePaths 需要它存在
 sudo systemctl daemon-reload && sudo systemctl enable --now mediamtx tinycast
 ```
 
@@ -166,8 +167,10 @@ sudo systemctl daemon-reload && sudo systemctl enable --now mediamtx tinycast
 5. 超过 5 分钟未重推，释放用户名与令牌；
 6. 房间名仅用于展示，允许重名。
 
-回调只接受内网来源（`MEDIAMTX_AUTH_ALLOWED_CIDRS`），并可加 `?secret=` 共享密钥，
-因此外网无法直接调用它伪造身份。
+回调默认只接受本机来源（`MEDIAMTX_AUTH_ALLOWED_CIDRS`），并可加 `?secret=` 共享密钥，
+因此外网无法直接调用它伪造身份。如果 tinycast 前面还有 nginx / Caddy 之类的反向代理，
+请在代理上拒绝 `/internal/` 路径并配置 `MEDIAMTX_AUTH_SECRET`；`TRUSTED_PROXIES` 只用来
+采信 `X-Forwarded-For`，不能替代这两步。
 
 ## 房间状态机
 
@@ -304,7 +307,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | POST | `/api/rooms/{username}/watch` | 观看心跳，`{"viewerId":"..."}` |
 | DELETE | `/api/rooms/{username}/watch?viewerId=...` | 离开 |
 | GET | `/api/events` | SSE 快照流（`event: rooms`） |
-| POST | `/internal/mtx/auth` | MediaMTX 回调，**仅内网** |
+| POST | `/internal/mtx/auth` | MediaMTX 回调，**仅本机**（容器部署按 CIDR 放开） |
 | * | `/hls/*`、`/rtc/*` | 反代到 MediaMTX 的 HLS / WHEP（含 302 改写） |
 
 在线人数 = 该房间在 `VIEWER_TIMEOUT` 内有过心跳的 `viewerId` 数量。
@@ -316,19 +319,22 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | --- | --- | --- |
 | `HTTP_ADDR` | `:18855` | 监听地址 |
 | `PUBLIC_BASE_URL` | 空 | 对外地址，留空按浏览器地址推断 |
-| `LOG_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 空 / `16` / `3` | 日志级别与滚动；终端只输出报错，`debug` 时终端才与文件一致 |
+| `TRUSTED_PROXIES` | 127.0.0.0/8,::1/128 | 只有这些来源的 X-Forwarded-For 才被采信；反代在别的网段时按实际填写 |
+| `LOG_LEVEL` / `LOG_CONSOLE_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 跟随 `LOG_LEVEL` / 空 / `16` / `3` | 文件级别、终端级别与滚动；终端默认与文件一致，设 `LOG_CONSOLE_LEVEL=error` 可只看报错。Windows/Linux 的启动脚本会在 MediaMTX 日志超过 16 MB 时滚动，保留三份 |
 | `ROOM_GRACE` | `5m` | 断流保留时长 |
 | `MONITOR_INTERVAL` | `1s` | 轮询 MediaMTX 路径的间隔 |
 | `VIEWER_TIMEOUT` | `30s` | 心跳超时 |
 | `PENDING_TIMEOUT` | `60s` | 鉴权通过但未真正推流的绑定保留时长 |
 | `MEDIAMTX_APP` | `live` | 推流 app 名（RTMP 地址里的 `/live`） |
 | `MEDIAMTX_API_URL` | `http://127.0.0.1:9997` | 路径状态 API |
+| `MEDIAMTX_API_USER` / `MEDIAMTX_API_PASSWORD` | 空 | MediaMTX 用 `authInternalUsers` 给 api 加认证时，填对应的用户名/密码 |
 | `MEDIAMTX_AUTH_SECRET` | 空 | 回调共享密钥，需与 mediamtx.yml 的 `?secret=` 一致 |
-| `MEDIAMTX_AUTH_ALLOWED_CIDRS` | 本机 + 内网 | 允许回调的来源网段 |
+| `MEDIAMTX_AUTH_ALLOWED_CIDRS` | 127.0.0.0/8,::1/128 | 允许回调的来源网段；Docker 需显式放开容器网段 |
 | `MEDIAMTX_HLS_PROXY_TARGET` | `http://127.0.0.1:8888` | `/hls/` 上游 |
 | `MEDIAMTX_WHEP_PROXY_TARGET` | `http://127.0.0.1:8889` | `/rtc/` 上游 |
 | `MEDIAMTX_RTMP_PUBLIC_BASE` | `rtmp://localhost:1935/live` | 展示给主播的服务器地址 |
 | `CORS_ALLOWED_ORIGINS` | 空 | 前后端分离时才需要 |
+| `TINYCAST_ENV` | 空 | 默认读取的环境变量文件；`-config` 优先于它，`-addr` 优先于 `HTTP_ADDR` |
 
 时长支持 `90s`、`5m`、`2m30s` 或纯秒数 `300`。
 
@@ -347,7 +353,7 @@ go run ./cmd/tinycast -open        # 后端 :18855，-open 自动开浏览器
 cd web && pnpm dev                 # 前端 :5173，代理 /api 与 /rtc 到后端
 
 # MediaMTX（本地验证推流链路）
-.tools/mtx/mediamtx .tools/mtx/mtx-e2e.yml
+.tools/mtx/mediamtx deploy/mediamtx/mediamtx.yml   # 需要先放好前端产物与 Go 后端
 ```
 
 测试：
@@ -387,7 +393,7 @@ dist/                    发布产物（不入库）
 - **人数靠心跳**：HLS 会话按请求创建、数量不可靠，因此用稳定 `viewerId` + 心跳，两种通道统一计数。
 - **媒体反代**：浏览器只和 18855 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
 - **令牌哈希**：服务端只存 SHA-256，房间列表与日志都不出现明文。
-- **终端保持安静**：非 `debug` 模式下屏幕只留报错，访问日志与巡检日志写进 `LOG_FILE`；排查时把 `LOG_LEVEL` 改成 `debug` 即可两边同步。
+- **终端默认可见**：终端与 `LOG_FILE` 默认使用同一个 `LOG_LEVEL`，排查时不用再去翻文件；需要安静（例如交给 systemd）时设 `LOG_CONSOLE_LEVEL=error`。
 
 ## 故障排查
 

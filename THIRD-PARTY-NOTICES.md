@@ -9,7 +9,7 @@ TinyCast 本身以 MIT 许可发布，见 LICENSE。发布包与 Docker 镜像�
 | hls.js | 1.7.4 | Apache-2.0 | 打包进前端 bundle，内嵌于 tinycast 二进制 | (c) 2017 Dailymotion；部分代码 (c) 2013-2015 Brightcove |
 | Vue（含官方子包） | 3.5.44 | MIT | 打包进前端 bundle，内嵌于 tinycast 二进制 | (c) 2018-present Yuxi (Evan) You |
 | vue-router | 4.6.4 | MIT | 打包进前端 bundle，内嵌于 tinycast 二进制 | (c) 2019-present Eduardo San Martin Morote |
-| Go 标准库 | go1.27.3 | BSD-3-Clause | 静态链接进 tinycast 二进制 | (c) 2009 The Go Authors |
+| Go 标准库 | go1.24（Docker 构建）/ go1.27.3（本机发布包） | BSD-3-Clause | 静态链接进 tinycast 二进制 | (c) 2009 The Go Authors |
 
 构建期依赖（vite、@vitejs/plugin-vue、TypeScript、vue-tsc、vitest、happy-dom 等）只在构建时使用，
 不随产物分发，因此不在此列。
