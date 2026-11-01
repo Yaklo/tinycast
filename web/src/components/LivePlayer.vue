@@ -259,6 +259,11 @@ let hls: HlsHandle | null = null
 let monitorTimer: ReturnType<typeof setInterval> | null = null
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null
 let retryTimer: ReturnType<typeof setTimeout> | null = null
+/** 网络错误重试计数与定时器：断流时 hls.js 会立刻失败，必须自己退避。 */
+let networkRetryTimer: ReturnType<typeof setTimeout> | null = null
+let networkRetries = 0
+/** 解码错误重试次数：编码确实不支持时 recoverMediaError 只会无限黑屏。 */
+let mediaRetries = 0
 let lastFrameAt = 0
 let lastFrameCount = 0
 /** HLS 侧的累计丢帧数：getVideoPlaybackQuality 给的是累计值，需要自己差分。 */
@@ -448,6 +453,10 @@ function teardown(): void {
     clearTimeout(retryTimer)
     retryTimer = null
   }
+  if (networkRetryTimer !== null) {
+    clearTimeout(networkRetryTimer)
+    networkRetryTimer = null
+  }
   if (hls) {
     try {
       hls.destroy()
@@ -506,6 +515,8 @@ async function start(): Promise<void> {
   engineNotice.value = fallbackNotice
   delivery.value = 'unknown'
   engineFallbackTried = false
+  networkRetries = 0
+  mediaRetries = 0
 
   try {
     const data = await fetchPlay(props.room.username)
@@ -616,7 +627,8 @@ async function startHLS(token: number): Promise<void> {
       },
       { once: true },
     )
-    phase.value = 'playing'
+    // 不要在这里把 phase 置成 playing：原生播放器同样可能只拉到清单却一帧都解不出来。
+    // 真正的 playing 由 trackProgress 在 framesDecoded 增长时推进。
     return
   }
 
@@ -658,24 +670,62 @@ async function startHLS(token: number): Promise<void> {
   instance.on(Hls.Events.MANIFEST_PARSED, () => {
     seekLive()
     void video.play().catch(() => {})
-    phase.value = 'playing'
+    // 清单解析只代表「地址通了」，不代表能解码出画面；phase 交给 trackProgress。
+    networkRetries = 0
+    overlayNote.value = ''
   })
 
   instance.on(Hls.Events.ERROR, (_event, data) => {
     if (!data.fatal) return
+    const failure = data as unknown as { response?: { code?: number }; details?: string }
+    const details = String(failure.details ?? data.details ?? '')
+
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      instance.startLoad()
+      // 清单/分片 404 表示流已经不在 MediaMTX 里了，重试没有意义。
+      if (failure.response?.code === 404) {
+        fail('直播已经结束：服务器上找不到这个流了。')
+        return
+      }
+      if (networkRetries >= 8) {
+        fail('直播已结束或网络异常，重试多次仍未恢复。请稍后重新连接。')
+        return
+      }
+      networkRetries++
+      const delay = Math.min(8000, 500 * 2 ** (networkRetries - 1))
+      const note =
+        '网络中断，' + Math.round((delay / 1000) * 10) / 10 + ' 秒后重试（' + networkRetries + '/8）'
+      // 播放中覆盖层是隐藏的，把提示放到画面上的 stall-chip；否则写得进覆盖层。
+      if (phase.value === 'playing') stallNote.value = note
+      else overlayNote.value = note
+      if (networkRetryTimer !== null) clearTimeout(networkRetryTimer)
+      networkRetryTimer = setTimeout(() => {
+        networkRetryTimer = null
+        if (token !== generation) return
+        if (phase.value === 'playing') stallNote.value = ''
+        else overlayNote.value = ''
+        instance.startLoad()
+      }, delay)
       return
     }
+
     if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
       // 编码不被 MSE 支持（Safari 上常见于 H.265 / AV1）：换原生播放器还有救，
       // 反复 recoverMediaError 只会黑屏转圈，所以先降级一次。
-      const codecProblem = /addCodecError|appendError|incompatibleCodecs/i.test(String(data.details))
-      if (codecProblem && fallbackToNative()) return
+      const codecProblem = /addCodecError|appendError|incompatibleCodecs/i.test(details)
+      if (codecProblem) {
+        if (fallbackToNative()) return
+        fail('当前浏览器无法解码这个流。' + noFrameHint(props.media, 'hls'))
+        return
+      }
+      if (mediaRetries >= 2) {
+        fail('播放器连续解码失败。' + noFrameHint(props.media, 'hls'))
+        return
+      }
+      mediaRetries++
       instance.recoverMediaError()
       return
     }
-    fail('HLS 播放失败：' + data.details + '。' + noFrameHint(props.media, 'hls'))
+    fail('HLS 播放失败：' + details + '。' + noFrameHint(props.media, 'hls'))
   })
 
   // 分片下载完成才知道真实码率与下载速率：HLS 没有 RTCP，这些只能自己量。
@@ -693,6 +743,12 @@ async function startHLS(token: number): Promise<void> {
     const loaded = Number(stats?.total ?? 0) || Number(stats?.loaded ?? 0)
     const duration = Number(frag?.duration ?? 0)
     if (loaded <= 0) return
+    // 已经恢复出数据就别再触发退避重连，否则定时器到点会白闪一下。
+    if (networkRetryTimer !== null) {
+      clearTimeout(networkRetryTimer)
+      networkRetryTimer = null
+    }
+    networkRetries = 0
     hlsBytes += loaded
     const start = Number(stats?.loading?.start ?? 0)
     const stop = Number(stats?.loading?.end ?? 0)
@@ -764,7 +820,8 @@ async function startWebRTC(token: number): Promise<void> {
     const state = conn.connectionState
     connState.value = state
     if (state === 'connected') {
-      if (phase.value !== 'error') phase.value = 'playing'
+      // 信令连上只说明 ICE/DTLS 通了；没有视频帧时仍然停在「等待画面」，由 watchdog 提示。
+      if (phase.value !== 'error') overlayNote.value = '已连上媒体服务器，正在等待视频帧…'
     } else if (state === 'failed' || state === 'closed') {
       if (autoFallbackFromWebRTC('WebRTC 会话被媒体服务关闭')) return
       fail('WebRTC 连接失败，通常是 UDP 8000 被防火墙拦住，或 MediaMTX 的 webrtcAdditionalHosts 配置不对。')
@@ -983,6 +1040,8 @@ function trackProgress(next: StatsSample, now: number): void {
   if (phase.value === 'connecting' && frames > 0) {
     phase.value = 'playing'
     errorText.value = ''
+    overlayNote.value = ''
+    mediaRetries = 0
   }
 
   if (lastFrameAt > 0 && now - lastFrameAt > 8000 && phase.value === 'playing') {
@@ -1018,8 +1077,14 @@ function armWatchdog(token: number): void {
   if (watchdogTimer !== null) clearTimeout(watchdogTimer)
   watchdogTimer = setTimeout(() => {
     if (token !== generation) return
-    if (phase.value === 'playing' && lastFrameCount > 0) return
-    overlayNote.value = noFrameHint(props.media, mode.value)
+    if (lastFrameCount > 0) return
+    const hint = noFrameHint(props.media, mode.value)
+    if (phase.value === 'playing') {
+      // WebRTC 可能已经 connected、但一帧都没收到；此时覆盖层是隐藏的。
+      stallNote.value = '已经连上，但一直没有画面。' + hint
+    } else {
+      overlayNote.value = hint
+    }
   }, 9000)
 }
 
@@ -1206,6 +1271,17 @@ onBeforeUnmount(() => {
           <span class="spinner" aria-hidden="true"></span>
           <p class="overlay-title">{{ mode === 'hls' ? '正在连接 HLS 播放…' : '正在建立 WebRTC 连接…' }}</p>
           <p v-if="overlayNote" class="overlay-note">{{ overlayNote }}</p>
+          <div v-if="overlayNote" class="overlay-actions">
+            <button class="overlay-btn" type="button" @click="retry">重新连接</button>
+            <button
+              v-if="canSwitch"
+              class="overlay-btn ghost"
+              type="button"
+              @click="switchMode(mode === 'hls' ? 'webrtc' : 'hls')"
+            >
+              切换到 {{ mode === 'hls' ? 'WebRTC' : 'HLS' }}
+            </button>
+          </div>
         </template>
         <template v-else>
           <p class="overlay-title">无法播放</p>
@@ -1231,9 +1307,14 @@ onBeforeUnmount(() => {
         <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
       </p>
 
-      <p v-if="issue && issue.level === 'error' && issue.suggestMode" class="codec-hint">
+      <p v-if="issue && issue.level === 'error'" class="codec-hint">
         <span>{{ issue.title }}</span>
-        <button type="button" class="overlay-btn" @click="switchMode(issue.suggestMode!)">
+        <button
+          v-if="issue.suggestMode"
+          type="button"
+          class="overlay-btn"
+          @click="switchMode(issue.suggestMode!)"
+        >
           换到 {{ issue.suggestMode === 'hls' ? 'HLS' : 'WebRTC' }}
         </button>
       </p>

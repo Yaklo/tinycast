@@ -275,13 +275,24 @@ describe('LivePlayer', () => {
 
   it('播放中控制条静止 2.5 秒自动收起，动一下鼠标再出来', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    // 只有真的解出视频帧才算进入播放中；happy-dom 没有这个方法，手动补一个。
+    const quality = { totalVideoFrames: 30, droppedVideoFrames: 0 }
+    Object.defineProperty(HTMLMediaElement.prototype, 'getVideoPlaybackQuality', {
+      configurable: true,
+      value: () => quality,
+    })
+
     const wrapper = mountPlayer()
     await flushPromises()
 
     hlsLog.emit('hlsManifestParsed')
     await flushPromises()
-    expect(wrapper.find('.controls').attributes('style') ?? '').not.toContain('display: none')
 
+    // 第一次采样读到 30 帧，播放器才会从「正在连接」进入播放中。
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+
+    await wrapper.find('.player').trigger('mousemove')
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
     // v-show 会把 display 写成 none（happy-dom 下 isVisible() 不可靠，直接看 style）
@@ -290,6 +301,8 @@ describe('LivePlayer', () => {
     await wrapper.find('.player').trigger('mousemove')
     await flushPromises()
     expect(wrapper.find('.controls').attributes('style') ?? '').not.toContain('display: none')
+
+    delete (HTMLMediaElement.prototype as { getVideoPlaybackQuality?: unknown }).getVideoPlaybackQuality
   })
 
   it('三个通道都可用时可以切到 WebRTC', async () => {

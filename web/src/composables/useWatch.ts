@@ -119,6 +119,11 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
     else schedule()
   }
 
+  /** 从 bfcache 返回时页面没有重新挂载，pagehide 里停掉的心跳必须重新启动。 */
+  function onPageShow(event: PageTransitionEvent): void {
+    if (event.persisted && !active.value) start()
+  }
+
   if (!options.manual) {
     start()
     if (typeof document !== 'undefined') {
@@ -126,6 +131,7 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
     }
     if (typeof window !== 'undefined') {
       window.addEventListener('pagehide', leave)
+      window.addEventListener('pageshow', onPageShow)
     }
     onBeforeUnmount(() => {
       if (typeof document !== 'undefined') {
@@ -133,6 +139,7 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
       }
       if (typeof window !== 'undefined') {
         window.removeEventListener('pagehide', leave)
+        window.removeEventListener('pageshow', onPageShow)
       }
       leave()
     })

@@ -25,7 +25,7 @@ const media = ref<MediaInfo | null>(null)
  * 观众心跳：进入房间即开始上报，离开页面时主动下线。
  * 后端按 viewerId 去重，因此 WebRTC 与 HLS 两种播放模式下的人数口径一致。
  */
-useWatch(() => username.value)
+const viewerWatch = useWatch(() => username.value)
 
 /** 页面顶部只提示"换通道也救不了"的硬错误（例如 4:4:4 / 10bit），
  *  H.265 这类"切到 HLS 就能看"的情况交给播放器自己解释。 */
@@ -87,6 +87,9 @@ onMounted(() => {
 watch(username, () => {
   fallback.value = null
   media.value = null
+  // 同一页面切到另一个房间时必须把心跳改成新房间，否则会给旧房间永久 +1。
+  viewerWatch.leave()
+  viewerWatch.start()
   void load()
   void loadMedia()
 })
