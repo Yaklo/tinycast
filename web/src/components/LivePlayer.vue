@@ -54,6 +54,10 @@ const playback = ref<Playback | null>(null)
 const muted = ref(true)
 const theater = ref(false)
 const showStats = ref(false)
+/** 距离直播边缘的秒数：hls.js 直接给出，原生 HLS 用 seekable 末端估算。 */
+const latencySec = ref(0)
+/** 从低延迟通道自动回退到 HLS 时的说明条。 */
+const autoSwitchNote = ref('')
 
 const HISTORY_LIMIT = 60
 
@@ -73,7 +77,19 @@ const history = ref<StatsSample[]>([])
 
 let generation = 0
 let pc: RTCPeerConnection | null = null
-let hls: { destroy: () => void; startLoad: () => void; recoverMediaError: () => void } | null = null
+interface HlsHandle {
+  destroy: () => void
+  startLoad: () => void
+  recoverMediaError: () => void
+  /** hls.js 给出的“当前播放位置距直播边缘”的秒数 */
+  latency?: number
+  /** hls.js 认为应该起播/追平的位置 */
+  liveSyncPosition?: number
+  bandwidthEstimate?: number
+  levels?: { bitrate?: number }[]
+}
+
+let hls: HlsHandle | null = null
 let monitorTimer: ReturnType<typeof setInterval> | null = null
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null
 let retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -81,6 +97,10 @@ let lastFrameAt = 0
 let lastFrameCount = 0
 /** HLS 侧的累计丢帧数：getVideoPlaybackQuality 给的是累计值，需要自己差分。 */
 let droppedTotal = 0
+/** WebRTC 起播时刻，用来判断“连上很久却一帧都没有”。 */
+let webrtcSince = 0
+/** 同一次播放里只自动回退一次，避免通道来回跳。 */
+let fallbackTried = false
 
 /** 后端至少给出一个通道时，才显示通道切换（只有一侧可用时另一个按钮置灰）。 */
 const hasModes = computed(() => {
@@ -125,6 +145,7 @@ const grid = computed(() => {
     { label: '丢包/丢帧', value: s ? (s.lossRate > 0 ? (s.lossRate * 100).toFixed(2) + '%' : '0%') : '—' },
     { label: '抖动', value: s && s.jitterMs > 0 ? s.jitterMs + ' ms' : '—' },
     { label: '缓冲延迟', value: s && s.bufferMs > 0 ? s.bufferMs + ' ms' : '—' },
+    { label: '直播延迟', value: latencySec.value > 0 ? latencySec.value.toFixed(1) + ' s' : '—' },
     { label: '往返时延', value: s && s.rttMs > 0 ? s.rttMs + ' ms' : '—' },
     { label: '累计接收', value: s && s.receivedBytes > 0 ? formatBytes(s.receivedBytes) : '—' },
     { label: '解码帧', value: s && s.framesDecoded > 0 ? formatNumber(s.framesDecoded) : '—' },
@@ -242,6 +263,8 @@ async function start(): Promise<void> {
   lastFrameAt = 0
   lastFrameCount = 0
   droppedTotal = 0
+  latencySec.value = 0
+  webrtcSince = 0
 
   try {
     const data = await fetchPlay(props.room.username)
@@ -289,7 +312,14 @@ async function startHLS(token: number): Promise<void> {
   // Safari / iOS 原生支持 HLS，直接用 <video>，省掉 hls.js 与 MSE。
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url
-    video.addEventListener('loadedmetadata', () => void video.play().catch(() => {}), { once: true })
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
+        seekLive()
+        void video.play().catch(() => {})
+      },
+      { once: true },
+    )
     phase.value = 'playing'
     return
   }
@@ -309,14 +339,21 @@ async function startHLS(token: number): Promise<void> {
     return
   }
 
+  // hls.js 默认落后 3 个分片起播；MediaMTX 的分片对齐 OBS 关键帧（常见 2 秒），
+  // 于是观众一开始就落后 6 秒。这里压到 1 片、放宽追平速率，让它贴着直播边缘播。
   const instance = new Hls({
     lowLatencyMode: true,
-    backBufferLength: 30,
-    maxBufferLength: 12,
+    liveSyncDurationCount: 1,
+    liveMaxLatencyDurationCount: 4,
+    maxLiveSyncPlaybackRate: 1.5,
+    backBufferLength: 10,
+    maxBufferLength: 6,
+    enableWorker: true,
   })
-  hls = instance as unknown as typeof hls
+  hls = instance as unknown as HlsHandle
 
   instance.on(Hls.Events.MANIFEST_PARSED, () => {
+    seekLive()
     void video.play().catch(() => {})
     phase.value = 'playing'
   })
@@ -355,6 +392,7 @@ async function startWebRTC(token: number): Promise<void> {
 
   const conn = new Ctor({ bundlePolicy: 'max-bundle' })
   pc = conn
+  webrtcSince = Date.now()
 
   conn.addTransceiver('video', { direction: 'recvonly' })
   // 音频轨也留一条：MediaMTX 在没有音频时会补一条 PCMU 假轨，
@@ -375,7 +413,8 @@ async function startWebRTC(token: number): Promise<void> {
     connState.value = state
     if (state === 'connected') {
       if (phase.value !== 'error') phase.value = 'playing'
-    } else if (state === 'failed') {
+    } else if (state === 'failed' || state === 'closed') {
+      if (autoFallbackFromWebRTC('WebRTC 会话被媒体服务关闭')) return
       fail('WebRTC 连接失败，通常是 UDP 8000 被防火墙拦住，或 MediaMTX 的 webrtcAdditionalHosts 配置不对。')
     } else if (state === 'disconnected') {
       stallNote.value = 'WebRTC 连接中断，正在尝试恢复…'
@@ -411,6 +450,34 @@ async function startWebRTC(token: number): Promise<void> {
   }
 }
 
+/** 采样一次“落后直播边缘多少秒”，供统计面板与追平按钮使用。 */
+function syncLatency(): void {
+  if (hls && typeof hls.latency === 'number' && Number.isFinite(hls.latency)) {
+    latencySec.value = Math.max(0, hls.latency)
+    return
+  }
+  const video = videoEl.value
+  if (!video || !video.seekable || video.seekable.length === 0) return
+  const edge = video.seekable.end(video.seekable.length - 1)
+  const value = edge - video.currentTime
+  if (Number.isFinite(value) && value >= 0) latencySec.value = value
+}
+
+/** 跳到直播边缘：hls.js 用它的 liveSyncPosition，原生播放器用 seekable 末端。 */
+function seekLive(): void {
+  const video = videoEl.value
+  if (!video) return
+  const target = hls && typeof hls.liveSyncPosition === 'number' ? hls.liveSyncPosition : 0
+  if (target > 0) {
+    video.currentTime = target
+    return
+  }
+  if (video.seekable && video.seekable.length > 0) {
+    const edge = video.seekable.end(video.seekable.length - 1)
+    if (Number.isFinite(edge) && edge > 0) video.currentTime = Math.max(0, edge - 0.3)
+  }
+}
+
 function bufferedAhead(video: HTMLVideoElement | null): number {
   if (!video || !video.buffered || video.buffered.length === 0) return 0
   const index = video.buffered.length - 1
@@ -442,6 +509,7 @@ async function sampleOnce(token: number): Promise<void> {
       return
     }
   } else if (mode.value === 'hls') {
+    syncLatency()
     next = hlsSample(now, sample.value)
   }
 
@@ -495,7 +563,7 @@ function hlsSample(now: number, prev: StatsSample | null): StatsSample {
 }
 
 function hlsBandwidthKbps(): number {
-  const instance = hls as unknown as { bandwidthEstimate?: number; levels?: { bitrate?: number }[] } | null
+  const instance = hls
   if (!instance) return 0
   if (typeof instance.bandwidthEstimate === 'number' && instance.bandwidthEstimate > 0) {
     return Math.round(instance.bandwidthEstimate / 1000)
@@ -521,6 +589,30 @@ function trackProgress(next: StatsSample, now: number): void {
   if (lastFrameAt > 0 && now - lastFrameAt > 8000 && phase.value === 'playing') {
     stallNote.value = '画面停住了：已经超过 8 秒没有新的视频帧。' + noFrameHint(props.media, mode.value)
   }
+
+  // WebRTC 连上 6 秒还一帧都没有：MediaMTX 多半已经因为 B 帧把会话关掉了。
+  // 与其让观众盯着黑屏，不如自动切回 HLS。
+  if (mode.value === 'webrtc' && webrtcSince > 0 && frames === 0 && now - webrtcSince > 6000) {
+    autoFallbackFromWebRTC('低延迟通道 6 秒内没有收到画面')
+  }
+}
+
+/**
+ * 低延迟通道取不到画面时自动回退到 HLS。
+ * MediaMTX 检测到 H.264 带 B 帧会直接断开会话，这是最常见的原因。
+ * 不写回 localStorage：用户改好 OBS 设置后，下次仍然能一键回到低延迟。
+ */
+function autoFallbackFromWebRTC(reason: string): boolean {
+  if (mode.value !== 'webrtc' || fallbackTried) return false
+  if (!playback.value?.hlsUrl) return false
+  fallbackTried = true
+  autoSwitchNote.value =
+    reason +
+    '，已自动切回 HLS。最常见的原因是 OBS 的 H.264 开着 B 帧：把 输出 → 高级 →「最大 B 帧数」设为 0' +
+    '（x264 自定义选项写 bframes=0）后重新推流，再点「低延迟」即可。'
+  mode.value = 'hls'
+  if (props.room.state === 'LIVE') void start()
+  return true
 }
 
 function armWatchdog(token: number): void {
@@ -536,6 +628,8 @@ function switchMode(next: PlayMode): void {
   if (next === mode.value) return
   mode.value = next
   saveMode(next)
+  fallbackTried = false
+  autoSwitchNote.value = ''
   if (props.room.state === 'LIVE') void start()
 }
 
@@ -649,6 +743,11 @@ onBeforeUnmount(() => {
 
     <p v-if="phase === 'playing' && stallNote" class="stall-chip">{{ stallNote }}</p>
 
+    <p v-if="autoSwitchNote" class="stall-chip auto-chip">
+      <span>{{ autoSwitchNote }}</span>
+      <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
+    </p>
+
     <p v-if="issue && issue.level === 'error' && issue.suggestMode" class="codec-hint">
       <span>{{ issue.title }}</span>
       <button type="button" class="overlay-btn" @click="switchMode(issue.suggestMode!)">
@@ -683,6 +782,16 @@ onBeforeUnmount(() => {
       </div>
 
       <span class="media-chip" :title="describeMedia(props.media)">{{ describeMedia(props.media) || '编码未知' }}</span>
+
+      <button
+        v-if="mode === 'hls' && latencySec >= 2"
+        type="button"
+        class="latency-chip"
+        title="画面落后于直播，点一下追到最新"
+        @click="seekLive"
+      >
+        延迟 {{ latencySec.toFixed(1) }}s · 追平
+      </button>
 
       <div class="spacer"></div>
 
@@ -873,6 +982,44 @@ onBeforeUnmount(() => {
   color: #fde68a;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.latency-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  background: rgba(120, 53, 15, 0.85);
+  color: #fde68a;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.latency-chip:hover {
+  background: rgba(146, 64, 14, 0.95);
+}
+
+.auto-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.chip-btn {
+  flex: none;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  background: transparent;
+  color: #fde68a;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.chip-btn:hover {
+  background: rgba(245, 158, 11, 0.2);
 }
 
 .controls {

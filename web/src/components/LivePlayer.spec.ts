@@ -5,7 +5,7 @@ import type { RoomView } from '../types'
 
 const { fetchPlayMock, hlsLog } = vi.hoisted(() => ({
   fetchPlayMock: vi.fn(),
-  hlsLog: { loadSource: [] as string[], attachMedia: 0, destroyed: 0 },
+  hlsLog: { loadSource: [] as string[], attachMedia: 0, destroyed: 0, instances: [] as unknown[] },
 }))
 
 vi.mock('../api', () => ({ fetchPlay: fetchPlayMock }))
@@ -17,6 +17,11 @@ vi.mock('hls.js', () => {
     static isSupported = () => true
     bandwidthEstimate = 800_000
     levels = [{ bitrate: 900_000 }]
+    latency = 0
+    liveSyncPosition = 0
+    constructor() {
+      hlsLog.instances.push(this)
+    }
     loadSource(url: string) {
       hlsLog.loadSource.push(url)
     }
@@ -150,6 +155,7 @@ beforeEach(() => {
   hlsLog.loadSource = []
   hlsLog.attachMedia = 0
   hlsLog.destroyed = 0
+  hlsLog.instances = []
   FakePeerConnection.instances = []
   localStorage.clear()
   vi.stubGlobal('RTCPeerConnection', FakePeerConnection)
@@ -222,6 +228,49 @@ describe('LivePlayer', () => {
     expect(fetchPlayMock).toHaveBeenCalledTimes(2)
     expect(wrapper.findAll('.mode-btn')[1].classes()).toContain('active')
     expect(wrapper.find('.stats-grid').exists() || true).toBe(true)
+  })
+
+  it('HLS 落后直播边缘时给出追平按钮，并显示直播延迟', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const instance = hlsLog.instances[0] as { latency: number; liveSyncPosition: number }
+    instance.latency = 3.4
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await flushPromises()
+
+    const chip = wrapper.find('.latency-chip')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toContain('3.4')
+
+    await wrapper.find('.ctrl[title=' + JSON.stringify('显示播放统计') + ']').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.stats').text()).toContain('直播延迟')
+
+    await chip.trigger('click')
+    await flushPromises()
+  })
+
+  it('WebRTC 连上却收不到画面时自动切回 HLS', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls', true))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const lowLatency = wrapper.findAll('.mode-btn').find((node) => node.text() === '低延迟')
+    await lowLatency?.trigger('click')
+    await flushPromises()
+
+    for (let tick = 0; tick < 7; tick++) {
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
+    }
+
+    expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
+    expect(wrapper.text()).toContain('已自动切回 HLS')
+    expect(wrapper.text()).toContain('B 帧')
+    expect(hlsLog.loadSource.length).toBeGreaterThan(1)
   })
 
   it('记住上次选择的通道', async () => {
