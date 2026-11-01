@@ -1,7 +1,7 @@
 # 一台机器跑完整套服务：MediaMTX 负责媒体，tinycast 负责业务
 #
 #   docker compose up -d --build
-#   # 浏览器打开 http://<服务器地址>:8080
+#   # 浏览器打开 http://<服务器地址>:18855
 #
 # 正式部署请把 MEDIAMTX_RTMP_PUBLIC_BASE 改成观众能访问的地址，
 # 并同步修改 deploy/mediamtx/mediamtx.docker.yml 里的 webrtcAdditionalHosts。
@@ -12,7 +12,7 @@ services:
     image: tinycast:latest
     restart: unless-stopped
     environment:
-      HTTP_ADDR: ":8080"
+      HTTP_ADDR: ":18855"
       LOG_FILE: /var/log/tinycast/tinycast.log
       ROOM_GRACE: ${ROOM_GRACE:-5m}
       MONITOR_INTERVAL: ${MONITOR_INTERVAL:-1s}
@@ -27,7 +27,7 @@ services:
     volumes:
       - tinycast-logs:/var/log/tinycast
     ports:
-      - "8080:8080"
+      - "18855:18855"
     depends_on:
       - mediamtx
 

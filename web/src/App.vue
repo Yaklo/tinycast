@@ -32,7 +32,7 @@ onMounted(() => {
 .main {
   flex: 1;
   width: 100%;
-  max-width: 1120px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: clamp(20px, 4vw, 40px) clamp(16px, 4vw, 40px) 56px;
 }

@@ -8,11 +8,11 @@ import (
 
 // localURL 把监听地址翻译成浏览器能直接打开的地址。
 //
-// 监听 0.0.0.0 或 :8080 时浏览器无法直接访问，这里统一换成 127.0.0.1。
+// 监听 0.0.0.0 或 :18855 时浏览器无法直接访问，这里统一换成 127.0.0.1。
 func localURL(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "http://127.0.0.1:8080/"
+		return "http://127.0.0.1:18855/"
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
 		host = "127.0.0.1"

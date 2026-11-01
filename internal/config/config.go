@@ -16,7 +16,7 @@ import (
 
 // 默认值集中在这里，方便与 README 的配置表保持一致。
 const (
-	DefaultHTTPAddr        = ":8080"
+	DefaultHTTPAddr        = ":18855"
 	DefaultRoomGrace       = 5 * time.Minute
 	DefaultMonitorInterval = time.Second
 	DefaultViewerTimeout   = 30 * time.Second
@@ -31,7 +31,7 @@ const (
 
 // Config 是后端全部运行时配置。
 type Config struct {
-	// HTTPAddr 是 HTTP 服务监听地址，例如 ":8080"。
+	// HTTPAddr 是 HTTP 服务监听地址，例如 ":18855"。
 	HTTPAddr string
 	// RoomGrace 是推流断开后房间保留时长（需求规定 5 分钟）。
 	RoomGrace time.Duration

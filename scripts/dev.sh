@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 开发模式：同时跑 Go 后端（:8080）与 Vite 开发服务器（:5173，/api 与 /rtc 代理到后端）。
+# 开发模式：同时跑 Go 后端（:18855）与 Vite 开发服务器（:5173，/api 与 /rtc 代理到后端）。
 # 首次使用需要两处依赖就绪：web/node_modules 与 Go 模块缓存。
 set -euo pipefail
 
@@ -18,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> 启动后端 http://127.0.0.1:8080"
+echo "==> 启动后端 http://127.0.0.1:18855"
 go run ./cmd/tinycast &
 SERVER_PID=$!
 

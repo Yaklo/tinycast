@@ -29,7 +29,7 @@ TinyCast Windows 运行包使用说明
   3. 双击 start-all.cmd。会弹出两个窗口：
        TinyCast - MediaMTX   媒体服务，关掉它就断流；
        TinyCast 控制台       业务后端，按 Ctrl+C 停止。
-  4. 浏览器会自动打开 http://127.0.0.1:8080 。
+  4. 浏览器会自动打开 http://127.0.0.1:18855 。
   5. 点首页的“创建推流配置”，填用户名（3~32 位字母、数字、下划线、减号）
      和房间名称，点生成。
   6. 把生成结果里的“服务器”和“推流码”分别粘进 OBS：
@@ -47,12 +47,12 @@ TinyCast Windows 运行包使用说明
 四、端口
 
   TCP 1935   OBS 推流（RTMP）
-  TCP 8080   网页、接口，以及 /hls/ 与 /rtc/ 的反向代理
+  TCP 18855   网页、接口，以及 /hls/ 与 /rtc/ 的反向代理
   UDP 8000   WebRTC 媒体通道（“WebRTC”通道必需）
   TCP 9997   MediaMTX 管理接口，只监听 127.0.0.1，不对外
 
   只在本机自己看，可以不放通任何端口。
-  局域网或公网观看时，TCP 1935 / TCP 8080 / UDP 8000 都要放通。
+  局域网或公网观看时，TCP 1935 / TCP 18855 / UDP 8000 都要放通。
 
 
 五、局域网或公网观看
@@ -62,7 +62,7 @@ TinyCast Windows 运行包使用说明
      （只在本机测试时保持 [127.0.0.1] 即可。）
   2. tinycast.env 里把推流地址改成同一台机器的地址：
        MEDIAMTX_RTMP_PUBLIC_BASE=rtmp://192.168.1.10:1935/live
-  3. 重启 start-all.cmd，用 http://192.168.1.10:8080 打开页面。
+  3. 重启 start-all.cmd，用 http://192.168.1.10:18855 打开页面。
 
   正式对外时请在前面加一层 HTTPS 反向代理（Caddy / Nginx），
   并把 PUBLIC_BASE_URL 填成 https://你的域名 。
@@ -146,7 +146,7 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
   ③ 端口被占用（窗口一闪而过 / 日志里 bind 失败）
      - 1935 被别的流媒体软件占用：关掉它，或改 mediamtx.yml 的 rtmpAddress，
        并同步改 tinycast.env 的 MEDIAMTX_RTMP_PUBLIC_BASE；
-     - 8080 被占用：改 tinycast.env 的 HTTP_ADDR，同时改 mediamtx.yml 里
+     - 18855 被占用：改 tinycast.env 的 HTTP_ADDR，同时改 mediamtx.yml 里
        authHTTPAddress 的端口。
 
   ④ 想确认 MediaMTX 收到了流
@@ -161,7 +161,8 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
       HLS 不读 LL-HLS 分片）；看 H.265 时不要改，Safari 的 MSE 只解 H.264。
 
   ⑥ 想看更详细的日志
-     把 tinycast.env 的 LOG_LEVEL 改成 debug；
+     默认控制台只打印报错，完整日志在 logs\tinycast.log；
+     想看每一步在做什么，把 tinycast.env 的 LOG_LEVEL 改成 debug 再重启；
      MediaMTX 的日志在 logs\mediamtx.log，或直接看它的窗口。
 
 
@@ -172,6 +173,6 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
     代理与 MediaMTX 的地址。
     想再加一层：tinycast.env 设 MEDIAMTX_AUTH_SECRET=一串随机值，并把
     mediamtx\mediamtx.yml 的 authHTTPAddress 改成
-    http://127.0.0.1:8080/internal/mtx/auth?secret=同一个值 。
+    http://127.0.0.1:18855/internal/mtx/auth?secret=同一个值 。
   - 推流令牌只在浏览器里生成，服务端只存 SHA-256 哈希，不会出现在房间列表里。
   - 包内的 mediamtx.exe 来自 MediaMTX v1.21.3 官方发行版。

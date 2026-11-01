@@ -1,7 +1,7 @@
 # 在 Windows 上启动 TinyCast 后端（读取同目录的 tinycast.env）
 # 用法： powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1
 # 注意：MediaMTX 需先启动（mediamtx\mediamtx.exe mediamtx.yml），
-#       它的 authHTTPAddress 默认指向 http://127.0.0.1:8080/internal/mtx/auth
+#       它的 authHTTPAddress 默认指向 http://127.0.0.1:18855/internal/mtx/auth
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $exe = Join-Path $root 'bin\tinycast.exe'

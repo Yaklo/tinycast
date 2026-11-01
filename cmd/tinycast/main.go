@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"tinycast/internal/config"
 	"tinycast/internal/httpapi"
 	"tinycast/internal/hub"
-	"tinycast/internal/logfile"
 	"tinycast/internal/monitor"
 	"tinycast/internal/mtx"
 )
@@ -179,35 +177,6 @@ func buildVersion() string {
 		rev = rev[:7]
 	}
 	return fmt.Sprintf("%s (rev %s%s, %s, %s)", name, rev, dirty, when, info.GoVersion)
-}
-
-// newLogger 构造日志器：默认写标准输出，配置了 LOG_FILE 时同时按大小滚动落盘。
-func newLogger() (*slog.Logger, io.Closer, error) {
-	level := slog.LevelInfo
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-
-	var out io.Writer = os.Stdout
-	var closer io.Closer
-	if path := strings.TrimSpace(os.Getenv("LOG_FILE")); path != "" {
-		w, err := logfile.New(logfile.Options{
-			Path:     path,
-			MaxBytes: envInt64("LOG_MAX_MB", 16) << 20,
-			Keep:     int(envInt64("LOG_KEEP", 3)),
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		out = io.MultiWriter(os.Stdout, w)
-		closer = w
-	}
-	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level})), closer, nil
 }
 
 func envInt64(key string, def int64) int64 {

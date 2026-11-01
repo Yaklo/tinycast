@@ -50,12 +50,12 @@ func TestLoadEnvFileKeepsExistingEnv(t *testing.T) {
 	if err := os.WriteFile(path, []byte("HTTP_ADDR=:1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HTTP_ADDR", ":8080")
+	t.Setenv("HTTP_ADDR", ":18855")
 
 	if _, err := LoadEnvFile(path); err != nil {
 		t.Fatalf("LoadEnvFile: %v", err)
 	}
-	if got := os.Getenv("HTTP_ADDR"); got != ":8080" {
+	if got := os.Getenv("HTTP_ADDR"); got != ":18855" {
 		t.Fatalf("已有环境变量不应被文件覆盖，实际 %q", got)
 	}
 }

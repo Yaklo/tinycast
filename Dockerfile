@@ -23,5 +23,5 @@ RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -u 10001 tinycast
 COPY --from=build /out/tinycast /usr/local/bin/tinycast
 USER tinycast
-EXPOSE 8080
+EXPOSE 18855
 ENTRYPOINT ["/usr/local/bin/tinycast"]

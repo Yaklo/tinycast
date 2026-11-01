@@ -42,16 +42,34 @@ func Handler() http.Handler {
 				return
 			}
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			cloned := r.Clone(r.Context())
-			cloned.URL.Path = "/" + name
-			files.ServeHTTP(w, cloned)
+			serveFile(w, r, files, name)
 			return
+		}
+
+		// 根目录下的真实文件（favicon.ico、favicon.svg、apple-touch-icon.png 等）
+		// 直接按静态资源返回；否则浏览器请求图标会拿到 index.html。
+		// 文件名不含哈希，因此只做协商缓存，避免换图标后用户看不到新的。
+		if name != "index.html" {
+			if info, err := fs.Stat(dist, name); err == nil && !info.IsDir() {
+				w.Header().Set("Cache-Control", "no-cache")
+				serveFile(w, r, files, name)
+				return
+			}
 		}
 
 		// 其余路径（含 /r/<username> 这类前端路由）一律回退到 index.html。
 		w.Header().Set("Cache-Control", "no-cache")
 		serveIndex(w, r, index)
 	})
+}
+
+// serveFile 用 http.FileServer 交出 dist 里的某个文件。
+//
+// 请求路径要改成 dist 内的相对路径，否则 FileServer 会按原始 URL 再次解析。
+func serveFile(w http.ResponseWriter, r *http.Request, files http.Handler, name string) {
+	cloned := r.Clone(r.Context())
+	cloned.URL.Path = "/" + name
+	files.ServeHTTP(w, cloned)
 }
 
 // serveIndex 直接写出 index.html 的内容。

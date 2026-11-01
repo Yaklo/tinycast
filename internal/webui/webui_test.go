@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,44 @@ func TestMissingAssetIs404(t *testing.T) {
 	rec := get(t, "/assets/not-exists.js")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("缺失静态资源应返回 404，实际 %d", rec.Code)
+	}
+}
+
+// 根目录下的图标必须按静态资源返回，不能回退成 index.html。
+func TestServeRootStaticFiles(t *testing.T) {
+	dist, err := fs.Sub(assets, "dist")
+	if err != nil {
+		t.Fatalf("读取内嵌产物失败: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		prefix string
+	}{
+		{"favicon.ico", "image/"},
+		{"favicon.svg", "image/svg+xml"},
+		{"apple-touch-icon.png", "image/png"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := fs.Stat(dist, tc.name); err != nil {
+				t.Skipf("dist 里没有 %s（前端未构建）", tc.name)
+			}
+			rec := get(t, "/"+tc.name)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("应返回 200，实际 %d", rec.Code)
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, tc.prefix) {
+				t.Fatalf("Content-Type 应为 %s，实际 %q", tc.prefix, ct)
+			}
+			if body := rec.Body.String(); strings.Contains(body, "<div id=\"app\">") {
+				t.Fatal("不应回退到 index.html")
+			}
+			if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+				t.Fatalf("图标应使用协商缓存，Cache-Control=%q", cc)
+			}
+		})
 	}
 }
 

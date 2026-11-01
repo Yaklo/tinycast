@@ -24,14 +24,14 @@ describe('hasLowLatencyParts', () => {
 
 describe('firstVariantUrl', () => {
   it('把相对子清单解析成绝对地址', () => {
-    expect(firstVariantUrl(MASTER, 'http://127.0.0.1:8080/hls/live/alex/index.m3u8')).toBe(
-      'http://127.0.0.1:8080/hls/live/alex/video1_stream.m3u8?session=8f3c',
+    expect(firstVariantUrl(MASTER, 'http://127.0.0.1:18855/hls/live/alex/index.m3u8')).toBe(
+      'http://127.0.0.1:18855/hls/live/alex/video1_stream.m3u8?session=8f3c',
     )
   })
 
   it('已经是绝对地址时原样返回', () => {
     const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttp://cdn.example.com/a.m3u8'
-    expect(firstVariantUrl(master, 'http://127.0.0.1:8080/x/index.m3u8')).toBe('http://cdn.example.com/a.m3u8')
+    expect(firstVariantUrl(master, 'http://127.0.0.1:18855/x/index.m3u8')).toBe('http://cdn.example.com/a.m3u8')
   })
 
   it('跳过 # 注释行再取地址', () => {

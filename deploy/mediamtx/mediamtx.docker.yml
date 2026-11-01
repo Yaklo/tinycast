@@ -31,7 +31,7 @@ rtsp: no
 moq: no
 
 authMethod: http
-authHTTPAddress: http://tinycast:8080/internal/mtx/auth
+authHTTPAddress: http://tinycast:18855/internal/mtx/auth
 
 paths:
   all_others:

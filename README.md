@@ -35,7 +35,7 @@
    │                                      │  └────► WebRTC 8889 ──┘
    │                        auth 回调（publish / read）
    ▼                                      ▼
-                      Go 后端 tinycast :8080
+                      Go 后端 tinycast :18855
                       ├── /internal/mtx/auth  推流鉴权（仅内网）
                       ├── 轮询 /v3/paths/list 判断推流开/停 → 房间状态
                       ├── /api/*              房间、配置、心跳
@@ -44,7 +44,7 @@
                       └── /                   内嵌前端（go:embed）
 ```
 
-两个进程可以同机也可以容器编排。浏览器全程只访问 8080，媒体端口无需对外暴露（WebRTC 的 UDP 8000 除外）。
+两个进程可以同机也可以容器编排。浏览器全程只访问 18855，媒体端口无需对外暴露（WebRTC 的 UDP 8000 除外）。
 
 ## 快速开始（Docker）
 
@@ -53,7 +53,7 @@
 cp .env.example .env
 # 2. 起服务
 docker compose up -d --build
-# 3. 打开 http://<服务器地址>:8080
+# 3. 打开 http://<服务器地址>:18855
 ```
 
 正式部署记得改 `deploy/mediamtx/mediamtx.docker.yml` 里的 `webrtcAdditionalHosts` 与 compose 里的
@@ -259,9 +259,9 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `HTTP_ADDR` | `:8080` | 监听地址 |
+| `HTTP_ADDR` | `:18855` | 监听地址 |
 | `PUBLIC_BASE_URL` | 空 | 对外地址，留空按浏览器地址推断 |
-| `LOG_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 空 / `16` / `3` | 日志与滚动 |
+| `LOG_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 空 / `16` / `3` | 日志级别与滚动；终端只输出报错，`debug` 时终端才与文件一致 |
 | `ROOM_GRACE` | `5m` | 断流保留时长 |
 | `MONITOR_INTERVAL` | `1s` | 轮询 MediaMTX 路径的间隔 |
 | `VIEWER_TIMEOUT` | `30s` | 心跳超时 |
@@ -284,7 +284,7 @@ source scripts/dev-env.sh          # 把工具链指到仓库内的 .tools
 ./scripts/dev.sh                   # 同时启动 go run 与 pnpm dev
 
 # 单独跑
-go run ./cmd/tinycast -open        # 后端 :8080，-open 自动开浏览器
+go run ./cmd/tinycast -open        # 后端 :18855，-open 自动开浏览器
 cd web && pnpm dev                 # 前端 :5173，代理 /api 与 /rtc 到后端
 
 # MediaMTX（本地验证推流链路）
@@ -322,8 +322,9 @@ scripts/                 构建、开发、打包脚本
 - **鉴权放在回调里**：MediaMTX 只在推流开始时问一次后端，绑定关系与“是否已有一路推流”的判断在同一把锁内完成。
 - **状态靠轮询**：没有 unpublish 回调可用，用 1 秒轮询换简单与可靠；MediaMTX 短暂故障不清空房间。
 - **人数靠心跳**：HLS 会话按请求创建、数量不可靠，因此用稳定 `viewerId` + 心跳，两种通道统一计数。
-- **媒体反代**：浏览器只和 8080 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
+- **媒体反代**：浏览器只和 18855 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
 - **令牌哈希**：服务端只存 SHA-256，房间列表与日志都不出现明文。
+- **终端保持安静**：非 `debug` 模式下屏幕只留报错，访问日志与巡检日志写进 `LOG_FILE`；排查时把 `LOG_LEVEL` 改成 `debug` 即可两边同步。
 
 ## 故障排查
 
