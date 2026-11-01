@@ -1,0 +1,26 @@
+# 本地 Go 工具链与构建缓存（由 scripts/dev-env.sh 建立）
+.tools/
+
+# Go 构建产物
+/bin/
+*.exe
+*.test
+*.out
+
+# 前端依赖与构建产物
+node_modules/
+web/node_modules/
+web/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# 本地环境变量与日志
+.env
+.env.local
+*.log
+
+# 编辑器
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
