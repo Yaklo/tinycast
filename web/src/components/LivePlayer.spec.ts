@@ -33,7 +33,9 @@ vi.mock('hls.js', () => {
     levels = [{ bitrate: 900_000 }]
     latency = 0
     liveSyncPosition = 0
-    constructor() {
+    config: Record<string, unknown> = {}
+    constructor(config: Record<string, unknown> = {}) {
+      this.config = { ...config }
       hlsLog.instances.push(this)
     }
     loadSource(url: string) {
@@ -465,6 +467,69 @@ describe('LivePlayer', () => {
     await flushPromises()
 
     expect(wrapper.find('.overlay').text()).toContain('UDP 8000')
+  })
+
+  it('延迟档位：默认自动，按 1.2 秒目标起播', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const tiers = wrapper.findAll('.tier-btn')
+    expect(tiers.map((node) => node.text())).toEqual(['自动', '低延时', '稳定'])
+    expect(tiers[0].classes()).toContain('active')
+
+    const instance = hlsLog.instances[0] as { config: Record<string, unknown> }
+    expect(instance.config.lowLatencyMode).toBe(true)
+    expect(instance.config.liveSyncDuration).toBe(1.2)
+    expect(instance.config.liveMaxLatencyDuration).toBe(6)
+    // 两个都给会被 hls.js 判成非法配置
+    expect(instance.config.liveSyncDurationCount).toBeUndefined()
+  })
+
+  it('选「稳定」后按 3 秒目标重建，并记住选择', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const stable = wrapper.findAll('.tier-btn').find((node) => node.text() === '稳定')
+    await stable?.trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem('tinycast.playTier')).toBe('stable')
+    expect(fetchPlayMock).toHaveBeenCalledTimes(2)
+
+    const instance = hlsLog.instances[hlsLog.instances.length - 1] as { config: Record<string, unknown> }
+    expect(instance.config.liveSyncDuration).toBe(3)
+    expect(instance.config.liveMaxLatencyDuration).toBe(12)
+    expect(instance.config.maxBufferLength).toBe(6)
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.stats-grid').text()).toContain('稳定（3 秒）')
+  })
+
+  it('关闭 LL-HLS 后改用普通 HLS，延迟档位置灰', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const toggle = wrapper.find('.toggle input')
+    await toggle.setValue(false)
+    await flushPromises()
+
+    expect(localStorage.getItem('tinycast.llhls')).toBe('off')
+    const instance = hlsLog.instances[hlsLog.instances.length - 1] as { config: Record<string, unknown> }
+    expect(instance.config.lowLatencyMode).toBe(false)
+    expect(instance.config.liveSyncDurationCount).toBe(3)
+    expect(instance.config.liveSyncDuration).toBeUndefined()
+
+    for (const node of wrapper.findAll('.tier-btn')) {
+      expect(node.attributes('disabled')).toBeDefined()
+    }
+    expect(wrapper.find('.stats-grid').text()).toContain('普通 HLS（档位不生效）')
   })
 
   it('后端没有配置播放代理时提示配置项', async () => {

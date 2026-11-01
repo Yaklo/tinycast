@@ -8,6 +8,8 @@ import { ENGINE_OPTIONS, engineLabel, isSafariLike, mseSupported, resolveEngine 
 import type { Engine, EnginePref } from '../lib/engine'
 import { deliveryLabel, firstVariantUrl, hasLowLatencyParts } from '../lib/playlist'
 import type { Delivery } from '../lib/playlist'
+import { TIER_OPTIONS, applyTuning, hlsTuning, shouldUpgradeTier, tierLabel } from '../lib/tuning'
+import type { Tier } from '../lib/tuning'
 import type { MediaInfo, Playback, RoomView } from '../types'
 
 /**
@@ -94,6 +96,68 @@ function canUseNative(video?: HTMLVideoElement | null): boolean {
   return el.canPlayType('application/vnd.apple.mpegurl') !== ''
 }
 
+const TIER_KEY = 'tinycast.playTier'
+const LLHLS_KEY = 'tinycast.llhls'
+
+/** 记住用户选的延迟档位；没选过就用「自动」。 */
+function loadTier(): Tier {
+  try {
+    const stored = localStorage.getItem(TIER_KEY)
+    return stored === 'low' || stored === 'stable' ? stored : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+function saveTier(next: Tier): void {
+  try {
+    localStorage.setItem(TIER_KEY, next)
+  } catch {
+    // 隐私模式下不可写，忽略即可
+  }
+}
+
+/** LL-HLS 开关：关掉就退回普通 HLS（分片粒度粗、弱网更稳，代价是十几秒延迟）。 */
+function loadLlhls(): boolean {
+  try {
+    return localStorage.getItem(LLHLS_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+
+function saveLlhls(next: boolean): void {
+  try {
+    localStorage.setItem(LLHLS_KEY, next ? 'on' : 'off')
+  } catch {
+    // 隐私模式下不可写，忽略即可
+  }
+}
+
+const tier = ref<Tier>(loadTier())
+const llhls = ref<boolean>(loadLlhls())
+/** 自动档是否已经自己放宽过：只存在这次会话里，不写 localStorage，刷新就回到低延时。 */
+const autoUpgraded = ref(false)
+/** 自动放宽的说明。 */
+const tierNotice = ref('')
+/** 当前参数表允许的追平阈值（秒），0 表示不再主动追。 */
+let catchUpAfter = 1.8
+
+/** 现在真正生效的参数：档位 + LL-HLS 开关 + 是否已放宽。 */
+function currentTuning() {
+  return hlsTuning(tier.value, llhls.value, autoUpgraded.value)
+}
+
+/** 面板里展示的档位文案。 */
+const tierText = computed(() => tierLabel(tier.value, llhls.value, autoUpgraded.value))
+
+/** 档位按钮的悬停说明：为什么有时候是灰的。 */
+function tierTitle(value: Tier): string {
+  if (engine.value === 'native') return '原生播放器自己决定缓冲，档位只在 HLS.js 下生效'
+  if (!llhls.value) return '已关闭 LL-HLS，延迟档位只在 LL-HLS 下生效'
+  return TIER_OPTIONS.find((item) => item.value === value)?.hint ?? ''
+}
+
 const muted = ref(true)
 const theater = ref(false)
 const showStats = ref(false)
@@ -134,6 +198,8 @@ interface HlsHandle {
   liveSyncPosition?: number
   bandwidthEstimate?: number
   levels?: { bitrate?: number }[]
+  /** hls.js 的实时配置：延迟控制器每轮采样都会重新读，改它等于热调参 */
+  config?: Record<string, unknown>
 }
 
 let hls: HlsHandle | null = null
@@ -153,6 +219,8 @@ let hlsAudioWindow: { bytes: number; duration: number }[] = []
 let hlsLoads: { bytes: number; ms: number }[] = []
 /** 自动追平直播边缘的节流时间戳。 */
 let lastCatchUp = 0
+/** 最近一分钟里自动追平的次数：追得勤说明网络跟不上，是自动档放宽的依据。 */
+let catchUpJumps: number[] = []
 /** 清单给出的直播边缘（媒体时间）与记录时刻，用来算真实延迟。 */
 let edgePos = 0
 let edgeAt = 0
@@ -210,6 +278,7 @@ const grid = computed(() => {
     { label: '播放通道', value: mode.value === 'hls' ? 'HLS' : 'WebRTC' },
     { label: '播放方式', value: mode.value === 'hls' ? engineLabel(engine.value) : 'WebRTC' },
     { label: '分发协议', value: deliveryLabel(delivery.value) },
+    { label: '延迟档位', value: mode.value === 'hls' ? tierText.value : '—' },
     { label: '视频编码', value: labelOrDash(media?.videoCodec) },
     { label: '音频编码', value: labelOrDash(media?.audioCodec) },
     { label: '分辨率', value: resolution(s) },
@@ -379,6 +448,7 @@ async function start(): Promise<void> {
   hlsAudioWindow = []
   hlsLoads = []
   lastCatchUp = 0
+  catchUpJumps = []
   edgePos = 0
   edgeAt = 0
   engine.value = ''
@@ -421,6 +491,11 @@ async function load(token: number): Promise<void> {
 
 /** 原生播放器不给分片信息，只能读一次清单，判断是 LL-HLS 还是普通 HLS。 */
 async function probeDelivery(url: string, token: number): Promise<void> {
+  // 关掉 LL-HLS 时我们根本不看分片，没必要再去读清单判断。
+  if (!llhls.value) {
+    delivery.value = 'hls'
+    return
+  }
   try {
     const masterUrl = new URL(url, location.href).toString()
     const master = await fetch(masterUrl, { cache: 'no-store' })
@@ -476,6 +551,8 @@ async function startHLS(token: number): Promise<void> {
   engineNotice.value = decision.notice || fallbackNotice
 
   if (decision.engine === 'native') {
+    // 原生播放器自己决定缓冲，我们的追平逻辑只会捣乱。
+    catchUpAfter = 0
     video.src = url
     // 原生管线不给分片信息，只能自己去读清单区分 LL-HLS 与普通 HLS。
     void probeDelivery(url, token)
@@ -509,18 +586,14 @@ async function startHLS(token: number): Promise<void> {
 
   // hls.js 默认落后 3 个分片起播，而分片长度跟着主播的关键帧间隔走（OBS 默认 2~4 秒），
   // 于是观众一开始就落后 6~12 秒。这里按秒定目标、放宽追平速率，让它贴着直播边缘播。
-  // 用 liveSyncDuration 而不是 liveSyncDurationCount：前者按秒算，不受分片长度影响。
+  // 用 liveSyncDuration 而不是 liveSyncDurationCount：前者按秒算，不受分片长度影响；
+  // 两个都给会被 hls.js 判成非法配置直接抛错，所以参数表里同一时刻只会有一种。
+  const tuning = currentTuning()
+  const { catchUpAfter: chaseAfter, ...hlsConfig } = tuning
+  catchUpAfter = chaseAfter
   let instance: import('hls.js').default
   try {
-    instance = new Hls({
-      lowLatencyMode: true,
-      liveSyncDuration: 1.2,
-      liveMaxLatencyDuration: 6,
-      maxLiveSyncPlaybackRate: 1.5,
-      backBufferLength: 10,
-      maxBufferLength: 4,
-      enableWorker: true,
-    })
+    instance = new Hls({ ...hlsConfig, enableWorker: true })
   } catch (err) {
     fail('HLS 播放器初始化失败：' + (err instanceof Error ? err.message : String(err)))
     return
@@ -594,7 +667,8 @@ async function startHLS(token: number): Promise<void> {
       edgeAt = Date.now()
     }
     // partTarget 只有清单里带 #EXT-X-PART-INF 时才有值，也就是 LL-HLS。
-    if (Number(details?.partTarget ?? 0) > 0) delivery.value = 'll-hls'
+    // 关了 LL-HLS 时服务端照样发分片，但我们按整段播，这里就别再标成 LL-HLS 了。
+    if (llhls.value && Number(details?.partTarget ?? 0) > 0) delivery.value = 'll-hls'
   })
 
   instance.loadSource(url)
@@ -716,10 +790,12 @@ function seekLive(): void {
 
 /** 落后直播边缘超过 1.8 秒就悄悄追上去（6 秒内最多一次，避免频繁跳导致卡顿）。 */
 function catchUp(): void {
-  if (phase.value !== 'playing' || latencySec.value <= 1.8) return
+  if (catchUpAfter <= 0) return
+  if (phase.value !== 'playing' || latencySec.value <= catchUpAfter) return
   const now = Date.now()
   if (now - lastCatchUp < 6000) return
   lastCatchUp = now
+  catchUpJumps = [...catchUpJumps, now]
   seekLive()
 }
 
@@ -764,6 +840,34 @@ async function sampleOnce(token: number): Promise<void> {
   sample.value = next
   history.value = [...history.value, next].slice(-HISTORY_LIMIT)
   trackProgress(next, now)
+  if (mode.value === 'hls') maybeAutoUpgrade()
+}
+
+/**
+ * 自动档：网络跟不上时把参数放宽到「稳定」那一档。
+ *
+ * 只放宽、不降回，也不重建实例——重建会黑屏闪一下，而这里真正要做的是
+ * 「别再强行追平 + 允许更大的缓冲」，改 config 立刻生效：hls.js 的延迟控制器
+ * 每轮采样都会重读 liveSyncDuration / liveMaxLatencyDuration。
+ */
+function maybeAutoUpgrade(): void {
+  if (tier.value !== 'auto' || autoUpgraded.value || !llhls.value) return
+  const video = videoEl.value
+  // 起播头几秒缓冲和码率都在爬坡，这时候判断只会误伤：先让画面稳稳播 8 秒。
+  if (!video || video.readyState < 2 || video.currentTime < 8) return
+  const recent = history.value
+    .slice(-15)
+    .filter((item) => item.framesDecoded > 0 && item.bufferMs > 0)
+  const now = Date.now()
+  const jumps = catchUpJumps.filter((at) => now - at < 60000).length
+  const verdict = shouldUpgradeTier(recent, jumps)
+  if (!verdict.upgrade) return
+
+  autoUpgraded.value = true
+  const next = currentTuning()
+  catchUpAfter = next.catchUpAfter
+  if (hls?.config) applyTuning(hls.config, next)
+  tierNotice.value = verdict.reason + '，已自动放宽到稳定档参数（不再强行追平；重选「低延时」可以改回去）。'
 }
 
 /** 最近几个分片的 字节数 / 媒体时长 → 码率（kbps）。 */
@@ -903,6 +1007,41 @@ function switchMode(next: PlayMode): void {
   fallbackTried = false
   autoSwitchNote.value = ''
   if (props.room.state === 'LIVE') void start()
+}
+
+function restartPlayback(): void {
+  if (props.room.state === 'LIVE') void start()
+  else retry()
+}
+
+/**
+ * 换延迟档位。
+ *
+ * 手动选择会重建一次播放器，这样才能立刻落到该档的目标上（重建会黑屏闪 0.3~1 秒）；
+ * 自动档放宽走热调，不重建。
+ */
+function setTier(next: Tier): void {
+  if (tier.value === next) return
+  tier.value = next
+  saveTier(next)
+  autoUpgraded.value = false
+  tierNotice.value = ''
+  restartPlayback()
+}
+
+/** LL-HLS 开关：关掉就是普通 HLS，三个档位跟着失效。 */
+function setLlhls(next: boolean): void {
+  if (llhls.value === next) return
+  llhls.value = next
+  saveLlhls(next)
+  autoUpgraded.value = false
+  tierNotice.value = ''
+  restartPlayback()
+}
+
+function onLlhlsToggle(event: Event): void {
+  const input = event.target as HTMLInputElement | null
+  setLlhls(Boolean(input?.checked))
 }
 
 /**
@@ -1119,6 +1258,21 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <div v-if="mode === 'hls'" class="mode-switch tier-switch" role="group" aria-label="延迟档位">
+          <button
+            v-for="option in TIER_OPTIONS"
+            :key="option.value"
+            type="button"
+            class="tier-btn"
+            :class="{ active: tier === option.value }"
+            :disabled="!llhls || engine === 'native'"
+            :title="tierTitle(option.value)"
+            @click="setTier(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+
         <span class="media-chip" :title="describeMedia(props.media)">{{ describeMedia(props.media) || '编码未知' }}</span>
 
         <button
@@ -1203,6 +1357,14 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+        <div v-if="mode === 'hls'" class="engine-row">
+          <span class="engine-label">LL-HLS</span>
+          <label class="toggle">
+            <input type="checkbox" :checked="llhls" @change="onLlhlsToggle" />
+            <span>{{ llhls ? '已开启：0.2 秒分片，延迟 1 秒级' : '已关闭：普通 HLS，延迟约 10 秒，弱网更稳' }}</span>
+          </label>
+        </div>
+        <p v-if="mode === 'hls' && tierNotice" class="stats-note engine-notice">{{ tierNotice }}</p>
         <p v-if="engineNotice" class="stats-note engine-notice">{{ engineNotice }}</p>
         <dl class="stats-grid">
           <template v-for="row in grid" :key="row.label">
@@ -1217,6 +1379,9 @@ onBeforeUnmount(() => {
           </template>
           <template v-else-if="delivery === 'll-hls'">
             当前清单带 LL-HLS 分片（0.2 秒一片），播放器贴着直播边缘起播，延迟通常在 1 秒内。
+          </template>
+          <template v-else-if="!llhls">
+            已关闭 LL-HLS：按整段分片缓冲，延迟升到十几秒，换来弱网下不卡。
           </template>
         </p>
       </div>
@@ -1404,6 +1569,7 @@ onBeforeUnmount(() => {
   bottom: 0;
   z-index: 4;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -1437,7 +1603,8 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line);
 }
 
-.mode-btn {
+.mode-btn,
+.tier-btn {
   padding: 3px 9px;
   border-radius: 6px;
   border: none;
@@ -1447,14 +1614,36 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.mode-btn.active {
+.mode-btn.active,
+.tier-btn.active {
   background: rgba(99, 102, 241, 0.35);
   color: #e0e7ff;
 }
 
-.mode-btn:disabled {
+.mode-btn:disabled,
+.tier-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.tier-switch {
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #818cf8;
+  cursor: pointer;
 }
 
 .media-chip {
