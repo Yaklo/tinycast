@@ -12,7 +12,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"HTTP_ADDR", "ROOM_GRACE", "MONITOR_INTERVAL", "VIEWER_TIMEOUT", "PENDING_TIMEOUT",
-		"CORS_ALLOWED_ORIGINS", "PUBLIC_BASE_URL",
+		"CORS_ALLOWED_ORIGINS", "PUBLIC_BASE_URL", "TRUSTED_PROXIES",
 		"MEDIAMTX_APP", "MEDIAMTX_API_URL", "MEDIAMTX_API_USER", "MEDIAMTX_API_PASSWORD",
 		"MEDIAMTX_AUTH_SECRET", "MEDIAMTX_AUTH_ALLOWED_CIDRS", "MEDIAMTX_WHEP_PROXY_TARGET",
 		"MEDIAMTX_HLS_PROXY_TARGET", "MEDIAMTX_RTMP_PUBLIC_BASE",
@@ -43,6 +43,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if len(cfg.MediaMTX.AuthAllowed) == 0 {
 		t.Fatal("默认应带内网回调白名单")
+	}
+	if len(cfg.TrustedProxies) == 0 {
+		t.Fatal("默认应只信任本机反代")
 	}
 	if cfg.MonitorInterval != time.Second {
 		t.Fatalf("默认巡检间隔应为 1s，实际 %s", cfg.MonitorInterval)
@@ -103,6 +106,22 @@ func TestLoadAuthAllowedCIDRs(t *testing.T) {
 	}
 	if cfg.MediaMTX.AuthAllowed[0].String() != "10.1.0.0/16" {
 		t.Fatalf("网段解析错误：%s", cfg.MediaMTX.AuthAllowed[0])
+	}
+}
+
+func TestLoadTrustedProxies(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("TRUSTED_PROXIES", "10.9.0.0/16, 2001:db8::/32")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TrustedProxies) != 2 {
+		t.Fatalf("应解析出 2 个可信代理网段，实际 %d", len(cfg.TrustedProxies))
+	}
+	if cfg.TrustedProxies[0].String() != "10.9.0.0/16" {
+		t.Fatalf("网段解析错误：%s", cfg.TrustedProxies[0])
 	}
 }
 

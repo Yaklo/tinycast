@@ -33,20 +33,28 @@ const maxMTXAuthBody = 64 << 10
 // handleMTXAuth 处理 MediaMTX 的鉴权回调。
 //
 // 这是整个系统唯一的安全边界：
-//   - 只有内网来源（默认 127/8、10/8、172.16/12、192.168/16 等）能调用；
+//   - 只有本机来源（默认 127/8、::1/128）能调用；容器部署需显式配置网段；
 //   - 配置了 MEDIAMTX_AUTH_SECRET 时还要求共享密钥一致；
 //   - 推流的身份校验与占用（规则 1/2/3）全部在这里完成，前端无法绕过。
 //
 // 观看（read）一律放行：直播本身就是公开的，房间是否可看由前端按状态决定。
 // MediaMTX 自己读 /v3 接口时也会发 action=api，同样必须放行，否则后端监控会失明。
 func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
+	remote := s.clientIP(r)
 	if !s.authSecretOK(r) {
-		s.log.Warn("拒绝来源不明的鉴权回调：共享密钥不匹配", "remote", clientIP(r), "path", r.URL.Path)
+		s.log.Warn("拒绝来源不明的鉴权回调：共享密钥不匹配", "remote", remote, "path", r.URL.Path)
 		writeError(w, http.StatusUnauthorized, "invalid_secret", "鉴权回调密钥不正确")
 		return
 	}
-	if !s.authIPAllowed(clientIP(r)) {
-		s.log.Warn("拒绝公网来源的鉴权回调", "remote", clientIP(r))
+	// 没配密钥时不能接受任何转发请求：反向代理会让公网请求的 RemoteAddr
+	// 变成 127.0.0.1，从而伪装成本机回调。
+	if s.cfg.MediaMTX.AuthSecret == "" && hasForwardedHeader(r) {
+		s.log.Warn("拒绝经反向代理的鉴权回调：未配置 MEDIAMTX_AUTH_SECRET", "remote", remote)
+		writeError(w, http.StatusForbidden, "secret_required", "经反向代理的鉴权回调必须配置共享密钥")
+		return
+	}
+	if !s.authIPAllowed(remote) {
+		s.log.Warn("拒绝公网来源的鉴权回调", "remote", remote)
 		writeError(w, http.StatusForbidden, "ip_forbidden", "鉴权回调只允许内网来源")
 		return
 	}
@@ -62,11 +70,13 @@ func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
 	switch payload.Action {
 	case "publish":
 		s.authorizePublish(w, payload)
-	case "read", "api", "playback", "metrics", "":
+	case "read", "api", "playback", "metrics":
 		// 观看与内部接口不做身份校验。
 		allowAuth(w)
 	default:
-		allowAuth(w)
+		// MediaMTX 增加新 action 时默认拒绝，避免悄悄放行未知操作。
+		s.log.Warn("拒绝未知的鉴权 action", "action", payload.Action, "path", payload.Path)
+		writeError(w, http.StatusForbidden, "invalid_action", "未知的鉴权动作")
 	}
 }
 
@@ -90,7 +100,7 @@ func (s *Server) authorizePublish(w http.ResponseWriter, payload mtxAuthPayload)
 
 	result := s.hub.Bind(hub.BindInput{
 		Username:  username,
-		RoomName:  mtx.QueryValue(payload.Query, "room"),
+		RoomName:  mtx.DecodeRoomValue(mtx.QueryValue(payload.Query, "room")),
 		Token:     token,
 		SessionID: payload.ID,
 		IP:        payload.IP,

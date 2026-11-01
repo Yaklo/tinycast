@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,12 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				// net/http 的 ReverseProxy 在客户端中断下载时会 panic(http.ErrAbortHandler)，
+				// 这是"对端已经走了"的正常信号，不是服务端故障：不再打 ERROR 与完整栈。
+				// 原样抛回给 net/http，由它静默关闭连接；吞掉会让访问日志把中断记成 200。
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
 				s.log.Error("请求处理发生 panic", "path", r.URL.Path, "panic", rec, "stack", string(debug.Stack()))
 				writeError(w, http.StatusInternalServerError, "internal_error", "服务内部错误")
 			}
@@ -41,7 +48,7 @@ func (s *Server) logger(next http.Handler) http.Handler {
 			"status", status,
 			"bytes", rec.bytes,
 			"duration", time.Since(start).Round(time.Millisecond).String(),
-			"remote", clientIP(r),
+			"remote", s.clientIP(r),
 		)
 	})
 }
@@ -119,14 +126,59 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "SAMEORIGIN")
+		// 前端是同源 SPA：脚本只来自本站；HLS.js 的 worker 与 MSE 使用 blob:；
+		// 样式表由 Vite 打包，但 Vue 过渡仍可能写内联 style，所以 style-src 保留 unsafe-inline。
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'")
+		// 只有确实走 HTTPS 时才发 HSTS；本机 HTTP 调试不应被浏览器记住。
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+// clientIP 返回请求的真实来源地址。
+//
+// 只有当直连来源是可信反向代理时才采信 X-Forwarded-For / X-Real-IP：
+// 否则任何客户端都能自己写一个 XFF 头来冒充内网地址，绕过鉴权回调白名单。
+func (s *Server) clientIP(r *http.Request) string {
+	remote := hostOnly(r.RemoteAddr)
+	if !s.trustedProxy(remote) {
+		return remote
 	}
-	return host
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+			return hostOnly(first)
+		}
+	}
+	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+		return hostOnly(real)
+	}
+	return remote
+}
+
+func hostOnly(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return strings.Trim(addr, "[]")
+}
+
+func (s *Server) trustedProxy(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, network := range s.cfg.TrustedProxies {
+		if network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasForwardedHeader 判断请求是否经过反向代理。
+func hasForwardedHeader(r *http.Request) bool {
+	return r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != ""
 }

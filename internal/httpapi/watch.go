@@ -3,9 +3,13 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"tinycast/internal/hub"
 )
 
 // watchRequest 是观看心跳的请求体。
@@ -25,6 +29,19 @@ const maxViewerIDLen = 64
 // 同一个人反复拉去播放列表会被算成很多次；而 WebRTC 会话又看不到 HLS 观众。
 // 统一由前端心跳上报，两种播放模式的人数口径才一致。
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginRequest(r) {
+		writeError(w, http.StatusForbidden, "cross_origin", "观看心跳只接受同源请求")
+		return
+	}
+	// 走请求体上报时必须声明 application/json：跨站表单做不到这一点，
+	// 与 sameOriginRequest 一起把伪造人数的成本抬高。
+	if r.Method == http.MethodPost && r.URL.Query().Get("viewerId") == "" && r.ContentLength != 0 {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "请求体需要使用 application/json")
+			return
+		}
+	}
 	username := strings.TrimSpace(r.PathValue("username"))
 	viewerID, err := decodeViewerID(r)
 	if err != nil {
@@ -37,9 +54,19 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
 		return
 	}
-	s.hub.Watch(view.Username, viewerID)
-	// 人数变化需要立刻反映到其它观众与首页，因此刷新一次快照。
-	s.hub.Broadcast()
+	added, ok := s.hub.WatchChanged(view.Username, viewerID)
+	if !ok {
+		if view.ViewerCount >= hub.MaxViewersPerRoom {
+			writeError(w, http.StatusTooManyRequests, "room_full", "该房间观看人数已达上限")
+			return
+		}
+		writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
+		return
+	}
+	// 只有新增观众才需要广播；每 10 秒一次的心跳刷新不产生全量快照。
+	if added {
+		s.scheduleBroadcast()
+	}
 
 	updated, ok := s.hub.Room(view.Username)
 	if !ok {
@@ -54,6 +81,10 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 // handleUnwatch 在播放器主动离开时立即减一，不必等心跳超时。
 func (s *Server) handleUnwatch(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginRequest(r) {
+		writeError(w, http.StatusForbidden, "cross_origin", "观看心跳只接受同源请求")
+		return
+	}
 	username := strings.TrimSpace(r.PathValue("username"))
 	viewerID, err := decodeViewerID(r)
 	if err != nil {
@@ -61,9 +92,34 @@ func (s *Server) handleUnwatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.hub.Unwatch(username, viewerID)
-	s.hub.Broadcast()
+	if s.hub.Unwatch(username, viewerID) {
+		s.scheduleBroadcast()
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sameOriginRequest 阻止其它站点用表单或 no-cors fetch 伪造观看人数。
+//
+// 浏览器的跨站请求一定带 Sec-Fetch-Site: cross-site；老浏览器没有这个头时，
+// 退而检查 Origin 是否与本站一致。curl 之类不带任何头的客户端仍然可用。
+func sameOriginRequest(r *http.Request) bool {
+	// Sec-Fetch-Site 由浏览器写入，页面脚本改不了：同源请求直接放行，
+	// 不必再比对 Origin——反向代理可能改写 Host，严格比对会误伤正常观众。
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "":
+		// 老浏览器没有 Sec-Fetch-Site，退回检查 Origin。
+	default:
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeViewerID(r *http.Request) (string, error) {

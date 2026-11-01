@@ -99,6 +99,65 @@ func TestHLSProxyRewritesRedirect(t *testing.T) {
 	}
 }
 
+// 编码过的 .. 段会被 net/http 解码进 URL.Path，必须在进入反代前拒绝，
+// 否则请求可能被带到 MediaMTX 的其它接口上。
+func TestMediaProxyRejectsPathTraversal(t *testing.T) {
+	up := &fakeUpstream{}
+	srvUp := httptest.NewServer(up)
+	defer srvUp.Close()
+
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.MediaMTX.WHEPProxyTarget = srvUp.URL
+		c.MediaMTX.HLSProxyTarget = srvUp.URL
+	})
+
+	for _, target := range []string{
+		"/hls/%2e%2e/%2e%2e/internal/mtx/auth",
+		"/rtc/../internal/mtx/auth",
+		"/hls/live/..%2f..%2finternal",
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "127.0.0.1:50000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		// 明文的 .. 段会先被 ServeMux 用 307 重定向掉；编码过的段则进入下面的代理守卫。
+		if rec.Code == http.StatusTemporaryRedirect {
+			continue
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应返回 400，实际 %d %s", target, rec.Code, rec.Body.String())
+		}
+	}
+	if up.path != "" {
+		t.Fatalf("非法路径不应到达上游，实际 %s", up.path)
+	}
+}
+
+// 代理只应转发本应用的流路径，避免误配端口时把 MediaMTX 的管理接口暴露出去。
+func TestMediaProxyRejectsOtherApps(t *testing.T) {
+	up := &fakeUpstream{}
+	srvUp := httptest.NewServer(up)
+	defer srvUp.Close()
+
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.MediaMTX.WHEPProxyTarget = srvUp.URL
+		c.MediaMTX.HLSProxyTarget = srvUp.URL
+	})
+
+	for _, target := range []string{"/hls/v3/paths/list", "/rtc/api/v1/config", "/hls/other/alex/index.m3u8"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "127.0.0.1:50000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应返回 400，实际 %d %s", target, rec.Code, rec.Body.String())
+		}
+	}
+	if up.path != "" {
+		t.Fatalf("非本应用路径不应到达上游，实际 %s", up.path)
+	}
+}
+
 // 上游挂掉时给出明确的 502，而不是让前端拿到 SPA 的 HTML。
 func TestProxyUnreachableReturns502(t *testing.T) {
 	srvUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

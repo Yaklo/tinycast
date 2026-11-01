@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -65,6 +66,9 @@ func do(t *testing.T, srv *Server, method, target string, body string) (*httptes
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, target, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.RemoteAddr = "127.0.0.1:50000"
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -76,6 +80,21 @@ func do(t *testing.T, srv *Server, method, target string, body string) (*httptes
 		}
 	}
 	return rec, out
+}
+
+// mustLive 让测试快速构造一间已鉴权并开播的房间。
+func mustLive(t *testing.T, h *hub.Hub, username string) {
+	t.Helper()
+	res := h.Bind(hub.BindInput{
+		Username:  username,
+		RoomName:  username,
+		Token:     testToken,
+		SessionID: "live-" + username,
+	})
+	if !res.Allowed {
+		t.Fatalf("鉴权应通过，实际被拒: %s %s", res.Reason, res.Message)
+	}
+	h.ConfirmLive(username, nil)
 }
 
 func authBody(action, path, query, id string) string {
@@ -99,6 +118,77 @@ func publish(t *testing.T, srv *Server, username, room, token, session string) *
 	}
 	rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("publish", "live/"+username, query, session))
 	return rec
+}
+
+// SSE 连接必须同时受全局与单 IP 上限约束，否则一个脚本就能吃光描述符。
+func TestEventStreamLimits(t *testing.T) {
+	s := &Server{}
+	for i := 0; i < maxEventStreamsPerIP; i++ {
+		if !s.acquireEvent("192.0.2.1") {
+			t.Fatalf("第 %d 条连接不应被拒绝", i+1)
+		}
+	}
+	if s.acquireEvent("192.0.2.1") {
+		t.Fatal("同一 IP 超过上限后应拒绝")
+	}
+	if !s.acquireEvent("192.0.2.2") {
+		t.Fatal("其它 IP 不应受影响")
+	}
+	for i := 0; i < maxEventStreamsPerIP; i++ {
+		s.releaseEvent("192.0.2.1")
+	}
+	s.releaseEvent("192.0.2.2")
+	if !s.acquireEvent("192.0.2.1") {
+		t.Fatal("释放后应重新可用")
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "object-src 'none'") {
+		t.Fatalf("CSP 缺失或过于宽松：%q", csp)
+	}
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("明文 HTTP 不应发送 HSTS，实际 %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.TLS = &tls.ConnectionState{}
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if got := rec.Header().Get("Strict-Transport-Security"); !strings.Contains(got, "max-age=31536000") {
+		t.Fatalf("HTTPS 应发送 HSTS，实际 %q", got)
+	}
+}
+
+// 客户端中断 HLS 分片下载时 ReverseProxy 会 panic(http.ErrAbortHandler)，
+// recoverer 必须静默吞掉，不能变成 500 或 ERROR 日志。
+func TestRecovererRepanicsAbortHandler(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	h := srv.recoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/hls/live/alex/seg.mp4", nil)
+	rec := httptest.NewRecorder()
+	defer func() {
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Fatalf("应原样抛回哨兵值，实际 %v", got)
+		}
+		if rec.Code == http.StatusInternalServerError {
+			t.Fatalf("ErrAbortHandler 不应变成 500：%d", rec.Code)
+		}
+	}()
+	h.ServeHTTP(rec, req)
+	t.Fatal("ErrAbortHandler 应继续向上抛出")
 }
 
 func TestConfigEndpoint(t *testing.T) {
@@ -189,7 +279,7 @@ func TestPublishFlowCreatesRoom(t *testing.T) {
 // 只有 WebRTC 代理时推荐 webRTC，并通过 /api/config 反映出来。
 func TestPlayWithoutHLS(t *testing.T) {
 	srv, h := newTestServer(t, func(c *config.Config) { c.MediaMTX.HLSProxyTarget = "" })
-	h.ConfirmLive("alex", nil)
+	mustLive(t, h, "alex")
 
 	_, body := do(t, srv, http.MethodGet, "/api/config", "")
 	if body["hls"] != false || body["webrtc"] != true {
@@ -206,10 +296,27 @@ func TestPlayWithoutHLS(t *testing.T) {
 	}
 }
 
+// 配了 PUBLIC_BASE_URL 时播放地址要用绝对地址，方便反代到其它域名。
+func TestPlayUsesPublicBaseURL(t *testing.T) {
+	srv, h := newTestServer(t, func(c *config.Config) {
+		c.PublicBaseURL = "https://live.example.com/"
+	})
+	mustLive(t, h, "alex")
+
+	_, body := do(t, srv, http.MethodGet, "/api/rooms/alex/play", "")
+	play := body["playback"].(map[string]any)
+	if play["hlsUrl"] != "https://live.example.com/hls/live/alex/index.m3u8" {
+		t.Fatalf("HLS 绝对地址异常：%v", play["hlsUrl"])
+	}
+	if play["whepUrl"] != "https://live.example.com/rtc/live/alex/whep" {
+		t.Fatalf("WHEP 绝对地址异常：%v", play["whepUrl"])
+	}
+}
+
 // 断流保留期不能给播放地址，否则前端会播一个不存在的流。
 func TestPlayInGraceHasNoPlayback(t *testing.T) {
 	srv, h := newTestServer(t, nil)
-	h.ConfirmLive("alex", nil)
+	mustLive(t, h, "alex")
 	h.MarkGrace("alex")
 
 	_, body := do(t, srv, http.MethodGet, "/api/rooms/alex/play", "")
@@ -286,11 +393,76 @@ func TestPublishAcceptsTokenFromPasswordAndQuery(t *testing.T) {
 func TestAuthAllowsReadAndAPI(t *testing.T) {
 	srv, _ := newTestServer(t, nil)
 
-	for _, action := range []string{"read", "api", "metrics", ""} {
+	for _, action := range []string{"read", "api", "metrics"} {
 		rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody(action, "live/alex", "", "s1"))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("action=%q 应放行，实际 %d", action, rec.Code)
 		}
+	}
+
+	// 未知 action 必须拒绝，否则 MediaMTX 新增操作时会被静默放行。
+	rec, body := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("totally_unknown", "live/alex", "", "s1"))
+	if rec.Code != http.StatusForbidden || body["code"] != "invalid_action" {
+		t.Fatalf("未知 action 应拒绝，实际 %d %v", rec.Code, body)
+	}
+}
+
+// 反代部署时所有请求的 RemoteAddr 都是 127.0.0.1，不能因此把公网请求当成内网回调。
+func TestAuthRejectsForwardedRequestWithoutSecret(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("read", "live/alex", "", "s1")))
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("带转发头且未配置密钥时应拒绝，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 只有直连来源属于可信代理时才采信 X-Forwarded-For。
+func TestAuthUsesForwardedIPOnlyBehindTrustedProxy(t *testing.T) {
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.MediaMTX.AuthSecret = "s3cret"
+		c.TrustedProxies = mustCIDRs(t, "127.0.0.0/8")
+	})
+
+	send := func(remote, forwarded string) int {
+		req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth?secret=s3cret", strings.NewReader(authBody("read", "live/alex", "", "s1")))
+		req.RemoteAddr = remote
+		if forwarded != "" {
+			req.Header.Set("X-Forwarded-For", forwarded)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := send("127.0.0.1:50000", "203.0.113.9"); code != http.StatusForbidden {
+		t.Fatalf("公网来源经可信代理转发后应拒绝，实际 %d", code)
+	}
+	if code := send("203.0.113.9:50000", ""); code != http.StatusForbidden {
+		t.Fatalf("非白名单直连来源应拒绝，实际 %d", code)
+	}
+	if code := send("127.0.0.1:50000", ""); code != http.StatusOK {
+		t.Fatalf("本机直连来源应放行，实际 %d", code)
+	}
+}
+
+func TestEventStreamKeyAggregatesIPv6By64(t *testing.T) {
+	a := eventStreamKey("2001:db8:1:2::1")
+	b := eventStreamKey("2001:db8:1:2:ffff::9")
+	c := eventStreamKey("2001:db8:1:3::1")
+	if a != b {
+		t.Fatalf("同一 /64 应聚合到同一个键：%q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("不同 /64 不应共用键：%q", a)
+	}
+	if got := eventStreamKey("192.0.2.10"); got != "192.0.2.10" {
+		t.Fatalf("IPv4 应原样使用，实际 %q", got)
 	}
 }
 
@@ -333,7 +505,7 @@ func TestAuthRejectsPublicSource(t *testing.T) {
 
 func TestWatchHeartbeat(t *testing.T) {
 	srv, h := newTestServer(t, nil)
-	h.ConfirmLive("alex", nil)
+	mustLive(t, h, "alex")
 
 	rec, body := do(t, srv, http.MethodPost, "/api/rooms/alex/watch", `{"viewerId":"viewer-1"}`)
 	if rec.Code != http.StatusOK {
@@ -363,9 +535,62 @@ func TestWatchHeartbeat(t *testing.T) {
 	}
 }
 
+// 非 JSON 的请求体不应被接受，避免跨站表单直接伪造人数。
+func TestWatchRequiresJSONContentType(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader(`{"viewerId":"v1"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("应拒绝非 JSON 请求体，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if view, _ := h.Room("alex"); view.ViewerCount != 0 {
+		t.Fatalf("不应计入人数：%d", view.ViewerCount)
+	}
+}
+
+// 反代可能改写 Host：只要浏览器声明 Sec-Fetch-Site: same-origin 就放行；
+// 没有该头时才退回比对 Origin，跨站来源仍然拒绝。
+func TestWatchOriginChecks(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+
+	post := func(site, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader("{\"viewerId\":\"v1\"}"))
+		req.Header.Set("Content-Type", "application/json")
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		req.RemoteAddr = "127.0.0.1:50000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := post("cross-site", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("跨站请求应被拒绝，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("same-origin", "https://cdn.example.com"); rec.Code != http.StatusOK {
+		t.Fatalf("反代改写 Host 时同源请求应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("", "https://evil.example"); rec.Code != http.StatusForbidden {
+		t.Fatalf("没有 Sec-Fetch-Site 时跨源 Origin 应被拒绝，实际 %d", rec.Code)
+	}
+	if rec := post("", "http://example.com"); rec.Code != http.StatusOK {
+		t.Fatalf("同源 Origin 应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWatchValidatesViewerID(t *testing.T) {
 	srv, h := newTestServer(t, nil)
-	h.ConfirmLive("alex", nil)
+	mustLive(t, h, "alex")
 
 	for _, body := range []string{"", `{}`, `{"viewerId":"bad id!"}`, `{"viewerId":"` + strings.Repeat("a", 65) + `"}`} {
 		rec, out := do(t, srv, http.MethodPost, "/api/rooms/alex/watch", body)
@@ -419,7 +644,7 @@ func (r *syncRecorder) BodyString() string {
 
 func TestSSESendsInitialSnapshot(t *testing.T) {
 	srv, h := newTestServer(t, nil)
-	h.ConfirmLive("alex", nil)
+	mustLive(t, h, "alex")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	req.RemoteAddr = "127.0.0.1:50000"

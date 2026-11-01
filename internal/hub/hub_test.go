@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -139,6 +140,41 @@ func TestBindIsIdempotentForSameSession(t *testing.T) {
 	}
 }
 
+// 服务重启后内存里没有绑定，MediaMTX 却可能仍在推流；此时不能凭路径清单
+// 凭空建房间，否则任何人都能用自选令牌接管一间无主直播。
+func TestConfirmLiveDoesNotAdoptUnboundStream(t *testing.T) {
+	h, _ := newTestHub()
+
+	if h.ConfirmLive("alex", &MediaInfo{VideoCodec: "H264"}) {
+		t.Fatal("没有绑定的流不应被确认")
+	}
+	if _, ok := h.Room("alex"); ok {
+		t.Fatal("没有绑定就不应创建房间")
+	}
+	if len(h.Rooms()) != 0 {
+		t.Fatalf("房间列表应为空，实际 %d 条", len(h.Rooms()))
+	}
+}
+
+// 直播中的房间不能被后续鉴权改写标题：巡检每秒都会调用 ConfirmLive，
+// 若无条件用绑定里的 roomName 覆盖，攻击者换绑后下一秒标题就变了。
+func TestConfirmLiveKeepsLiveRoomName(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "原房间", testToken, "s1")
+	if !h.ConfirmLive("alex", nil) {
+		t.Fatal("首次确认应报告状态变化")
+	}
+
+	// 同一身份同一会话再次鉴权，只改展示名：LIVE 状态下应被忽略。
+	mustBind(t, h, "alex", "被改掉的标题", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+
+	view, _ := h.Room("alex")
+	if view.Room != "原房间" {
+		t.Fatalf("直播中的标题不应被改写，实际 %q", view.Room)
+	}
+}
+
 func TestConfirmLiveCreatesAndRestoresRoom(t *testing.T) {
 	h, clock := newTestHub()
 	mustBind(t, h, "alex", "测试直播", testToken, "s1")
@@ -267,6 +303,44 @@ func TestWatchCountsUniqueViewers(t *testing.T) {
 
 	if h.Watch("nobody", "viewer-3") {
 		t.Fatal("房间不存在时不应记录观看")
+	}
+}
+
+func TestWatchChangedReportsOnlyNewViewers(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+
+	if added, ok := h.WatchChanged("alex", "viewer-1"); !added || !ok {
+		t.Fatalf("首次观看应新增，实际 added=%v ok=%v", added, ok)
+	}
+	if added, ok := h.WatchChanged("alex", "viewer-1"); added || !ok {
+		t.Fatalf("重复心跳不应算新增，实际 added=%v ok=%v", added, ok)
+	}
+	if _, ok := h.WatchChanged("nobody", "viewer-2"); ok {
+		t.Fatal("房间不存在时应返回 false")
+	}
+	if h.Unwatch("alex", "not-there") {
+		t.Fatal("移除不存在的会话应返回 false")
+	}
+	if !h.Unwatch("alex", "viewer-1") {
+		t.Fatal("移除存在的会话应返回 true")
+	}
+}
+
+// 单个房间的观看会话必须有上限，避免伪造 viewerId 无限占用内存。
+func TestWatchRejectsViewersBeyondLimit(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+
+	for i := 0; i < MaxViewersPerRoom; i++ {
+		if _, ok := h.WatchChanged("alex", "viewer-"+strconv.Itoa(i)); !ok {
+			t.Fatalf("第 %d 个观众不应被拒绝", i+1)
+		}
+	}
+	if _, ok := h.WatchChanged("alex", "one-too-many"); ok {
+		t.Fatal("超过上限后应拒绝新观众")
 	}
 }
 

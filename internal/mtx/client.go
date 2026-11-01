@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -117,7 +118,8 @@ func (c *Client) Paths(ctx context.Context) (map[string]Path, error) {
 	}
 
 	var body pathsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	// 控制接口由本机 MediaMTX 提供，仍然限制响应体大小，避免异常情况下把内存吃满。
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("mtx: 解析 %s 响应失败: %w", endpoint, err)
 	}
 
@@ -126,6 +128,40 @@ func (c *Client) Paths(ctx context.Context) (map[string]Path, error) {
 		out[item.Name] = item
 	}
 	return out, nil
+}
+
+// GlobalConfig 是 /v3/config/global/get 里 tinycast 关心的字段。
+type GlobalConfig struct {
+	AuthHTTPAddress string `json:"authHTTPAddress"`
+}
+
+// GlobalConfig 读取 MediaMTX 的全局配置，用于启动时核对鉴权回调地址。
+func (c *Client) GlobalConfig(ctx context.Context) (GlobalConfig, error) {
+	if c == nil || c.base == "" {
+		return GlobalConfig{}, fmt.Errorf("mtx: 未配置 MediaMTX 控制接口地址")
+	}
+	endpoint := c.base + "/v3/config/global/get"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return GlobalConfig{}, fmt.Errorf("mtx: 构造请求失败: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return GlobalConfig{}, fmt.Errorf("mtx: 请求 %s 失败: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return GlobalConfig{}, fmt.Errorf("mtx: 请求 %s 返回 %d", endpoint, resp.StatusCode)
+	}
+	var body GlobalConfig
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return GlobalConfig{}, fmt.Errorf("mtx: 解析 %s 响应失败: %w", endpoint, err)
+	}
+	return body, nil
 }
 
 // StreamName 拼出 MediaMTX 的路径名，例如 live/alex。
@@ -176,4 +212,21 @@ func manualQueryValue(raw, key string) string {
 		return v
 	}
 	return ""
+}
+
+// DecodeRoomValue 还原房间名。
+//
+// 前端为了兼容 OBS（它会先把 URL 解码一次）生成的是双重编码的 room 参数，
+// 而 curl/ffmpeg 等客户端通常只发一次。QueryValue 已经解过一层，这里在结果
+// 仍然像百分号编码时再解一层，两种客户端都能得到同一个房间名。
+func DecodeRoomValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	for i := 0; i < 2 && strings.Contains(value, "%"); i++ {
+		next, err := url.QueryUnescape(value)
+		if err != nil || next == value {
+			break
+		}
+		value = next
+	}
+	return value
 }

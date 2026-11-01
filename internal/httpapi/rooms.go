@@ -99,15 +99,16 @@ func (s *Server) playbackFor(username string) *playback {
 	stream := url.PathEscape(username)
 	out := &playback{}
 
+	base := strings.TrimRight(s.cfg.PublicBaseURL, "/")
 	if s.hls != nil {
 		out.Protocol = "hls"
-		out.HLSURL = "/hls/" + s.cfg.MediaMTX.App + "/" + stream + "/index.m3u8"
+		out.HLSURL = base + "/hls/" + s.cfg.MediaMTX.App + "/" + stream + "/index.m3u8"
 	}
 	if s.whep != nil {
 		if out.Protocol == "" {
 			out.Protocol = "webrtc"
 		}
-		out.WhepURL = "/rtc/" + s.cfg.MediaMTX.App + "/" + stream + "/whep"
+		out.WhepURL = base + "/rtc/" + s.cfg.MediaMTX.App + "/" + stream + "/whep"
 	}
 	if out.Protocol == "" {
 		// 两个上游都没配置时依然返回结构体，前端据此显示"未启用播放"的提示。

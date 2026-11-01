@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,7 +27,12 @@ var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,256}$`)
 
 const (
 	// maxRoomNameRunes 是房间展示名长度上限，避免首页卡片被超长文本撑坏。
-	maxRoomNameRunes = 64
+	// 与前端 web/src/lib/validate.ts 的 MAX_ROOM_NAME_RUNES 保持一致。
+	maxRoomNameRunes = 40
+
+	// MaxViewersPerRoom 是单个房间的观看会话上限。
+	// 正常直播远达不到这个量级；设上限只是为了不让伪造的 viewerId 无限占内存。
+	MaxViewersPerRoom = 5000
 )
 
 // publisher 是一条已经通过鉴权的推流身份。
@@ -62,7 +68,7 @@ type Hub struct {
 	rooms      map[string]*room
 
 	grace    time.Duration
-	seq      uint64
+	seq      atomic.Uint64
 	watchers map[chan Snapshot]struct{}
 }
 
@@ -108,7 +114,7 @@ func (h *Hub) Bind(in BindInput) BindResult {
 		roomName = username
 	}
 	if runes := []rune(roomName); len(runes) > maxRoomNameRunes {
-		return BindResult{Reason: ReasonInvalidRoom, Message: "房间名称不能超过 64 个字符"}
+		return BindResult{Reason: ReasonInvalidRoom, Message: "房间名称不能超过 40 个字符"}
 	}
 
 	tokenHash := HashToken(token)
@@ -157,8 +163,9 @@ func (h *Hub) Bind(in BindInput) BindResult {
 	h.byUsername[username] = pub
 	h.byToken[tokenHash] = pub
 
-	// 房间若处于 GRACE，这里只更新展示名，等真正推流成功再回到 LIVE。
-	if rm, ok := h.rooms[username]; ok {
+	// 直播中的房间不允许被后续鉴权改写展示名：攻击者拿到一个格式合法的令牌，
+	// 就能把别人正在播的房间标题改掉。只有 GRACE（主播自己重推）才更新标题。
+	if rm, ok := h.rooms[username]; ok && rm.state != StateLive {
 		rm.roomName = roomName
 	}
 
@@ -180,16 +187,19 @@ func (h *Hub) ConfirmLive(username string, media *MediaInfo) bool {
 	defer h.mu.Unlock()
 
 	pub, hasPub := h.byUsername[username]
-	roomName := username
-	if hasPub {
-		roomName = pub.roomName
+	if !hasPub {
+		// 没有鉴权绑定的路径一律不建房间。
+		//
+		// 早先这里会"接管"后端启动前就已经在推的流，但那会让任何拿到格式合法
+		// 令牌的人抢先绑上一个无主房间，再把真正的主播挡在门外。现在服务重启后
+		// 需要主播重新推流（OBS 点一次停止再开始）才能恢复展示——重启丢状态本来
+		// 就是需求允许的取舍。
+		return false
 	}
+	roomName := pub.roomName
 
 	rm, exists := h.rooms[username]
 	if !exists {
-		// 这段分支同时承担"接管"职责：后端比 MediaMTX 晚启动、或后端刚重启时，
-		// 媒体其实已经在流动，但内存里还没有任何身份。此时先按路径创建房间，
-		// 让观众能进来看；等主播下次重新推流触发鉴权时 Bind 会把展示名与令牌补上。
 		rm = &room{
 			username: username,
 			roomName: roomName,
@@ -203,9 +213,11 @@ func (h *Hub) ConfirmLive(username string, media *MediaInfo) bool {
 	changed := rm.state != StateLive || !exists
 	if changed {
 		rm.startedAt = h.now()
+		// 只在状态变化时写展示名：直播中的房间若被后续鉴权换了绑定，
+		// 巡检每秒调用本方法，无条件覆盖会把攻击者选的标题写上去。
+		rm.roomName = roomName
 	}
 	rm.state = StateLive
-	rm.roomName = roomName
 	rm.graceUntil = time.Time{}
 	if media != nil {
 		if rm.media == nil || *rm.media != *media {
@@ -233,7 +245,42 @@ func (h *Hub) MarkGrace(username string) bool {
 }
 
 // Watch 记录一次观看心跳：同一个 viewerID 重复调用只会刷新时间，不会重复计数。
+// 返回值表示房间是否存在且人数未超限；重复心跳同样返回 true。
 func (h *Hub) Watch(username, viewerID string) bool {
+	_, ok := h.watch(username, viewerID)
+	return ok
+}
+
+// WatchChanged 与 Watch 相同，但额外返回"本次是否新增了观看会话"。
+// 心跳刷新不应该触发全量 SSE 广播，只有人数变化时才需要。
+func (h *Hub) WatchChanged(username, viewerID string) (added, ok bool) {
+	return h.watch(username, viewerID)
+}
+
+func (h *Hub) watch(username, viewerID string) (added, ok bool) {
+	if viewerID == "" {
+		return false, false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	rm, exists := h.rooms[username]
+	if !exists {
+		return false, false
+	}
+	if _, exists := rm.viewers[viewerID]; !exists {
+		if len(rm.viewers) >= MaxViewersPerRoom {
+			return false, false
+		}
+		added = true
+	}
+	rm.viewers[viewerID] = h.now()
+	return added, true
+}
+
+// Unwatch 移除观看会话（播放器主动离开或关闭页面），返回是否确实删除了一个会话。
+func (h *Hub) Unwatch(username, viewerID string) bool {
 	if viewerID == "" {
 		return false
 	}
@@ -245,22 +292,11 @@ func (h *Hub) Watch(username, viewerID string) bool {
 	if !ok {
 		return false
 	}
-	rm.viewers[viewerID] = h.now()
+	if _, exists := rm.viewers[viewerID]; !exists {
+		return false
+	}
+	delete(rm.viewers, viewerID)
 	return true
-}
-
-// Unwatch 移除观看会话（播放器主动离开或关闭页面）。
-func (h *Hub) Unwatch(username, viewerID string) {
-	if viewerID == "" {
-		return
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if rm, ok := h.rooms[username]; ok {
-		delete(rm.viewers, viewerID)
-	}
 }
 
 // PruneViewers 清理超过 timeout 没有心跳的观看会话，返回清理数量。
@@ -363,11 +399,10 @@ func (h *Hub) Rooms() []RoomView {
 
 // Snapshot 生成一份完整快照并递增版本号。
 func (h *Hub) Snapshot() Snapshot {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
-	h.seq++
-	snap := Snapshot{Seq: h.seq, ServerTime: h.now().UnixMilli()}
+	snap := Snapshot{Seq: h.seq.Add(1), ServerTime: h.now().UnixMilli()}
 	snap.Rooms = make([]RoomView, 0, len(h.rooms))
 	for username := range h.rooms {
 		snap.Rooms = append(snap.Rooms, h.viewLocked(username))
@@ -422,6 +457,13 @@ func (h *Hub) Subscribe() (<-chan Snapshot, func()) {
 		}
 		h.mu.Unlock()
 	}
+}
+
+// RoomCount 返回房间数量。健康检查不应该为了一个数字构造整份快照。
+func (h *Hub) RoomCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.rooms)
 }
 
 // SubscriberCount 返回当前 SSE 订阅者数量（用于健康检查与排障）。

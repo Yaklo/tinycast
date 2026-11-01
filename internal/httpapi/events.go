@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -11,10 +12,25 @@ import (
 	"tinycast/internal/hub"
 )
 
+// SSE 连接上限。单机部署下，一个脚本可以轻易打开成千上万条连接，
+// 每条连接都占一个文件描述符并参与每次全量广播；不设上限会把轻量服务拖死。
+const (
+	maxEventStreams      = 1024
+	maxEventStreamsPerIP = 16
+)
+
 // handleEvents 是一条长期保持的 SSE 连接。
 //
 // 每次变化都推送一份完整快照：前端不需要维护增量补丁，任何一帧丢失都能靠下一帧自愈。
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	ip := eventStreamKey(s.clientIP(r))
+	if !s.acquireEvent(ip) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "too_many_streams", "实时连接数已达上限，请稍后重试")
+		return
+	}
+	defer s.releaseEvent(ip)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "stream_unsupported", "当前连接不支持流式输出")
@@ -62,6 +78,43 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+// eventStreamKey 把 IPv6 地址收敛到 /64：同一台机器通常整段 /64 可用，
+// 逐地址计数等于没有上限。
+func eventStreamKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String()
+}
+
+func (s *Server) acquireEvent(ip string) bool {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	if s.eventsByIP == nil {
+		s.eventsByIP = make(map[string]int)
+	}
+	if s.eventsTotal >= maxEventStreams || s.eventsByIP[ip] >= maxEventStreamsPerIP {
+		return false
+	}
+	s.eventsTotal++
+	s.eventsByIP[ip]++
+	return true
+}
+
+func (s *Server) releaseEvent(ip string) {
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	if s.eventsTotal > 0 {
+		s.eventsTotal--
+	}
+	if n := s.eventsByIP[ip]; n > 1 {
+		s.eventsByIP[ip] = n - 1
+	} else {
+		delete(s.eventsByIP, ip)
 	}
 }
 

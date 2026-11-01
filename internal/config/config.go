@@ -48,6 +48,10 @@ type Config struct {
 	// PublicBaseURL 用于拼装返回给浏览器的绝对地址，例如 https://live.example.com。
 	// 为空时返回相对地址，由浏览器按当前 origin 解析。
 	PublicBaseURL string
+	// TrustedProxies 是允许提供 X-Forwarded-For 的反向代理网段。
+	// 只有直连来源落在这些网段里时，才采信转发头里的客户端地址；
+	// 否则任何人都能伪造 XFF 绕过鉴权回调与连接数限制。
+	TrustedProxies []*net.IPNet
 	// MediaMTX 保存与流媒体服务器相关的配置。
 	MediaMTX MediaMTXConfig
 }
@@ -62,7 +66,8 @@ type MediaMTXConfig struct {
 	APIUser     string
 	APIPassword string
 	// AuthSecret 是鉴权回调地址上的共享密钥，MediaMTX 配置里以 ?secret=xxx 传递。
-	// 为空表示不校验（仅建议本地调试使用，前提是来源 IP 白名单已经生效）。
+	// 为空表示不校验；此时会拒绝任何带转发头的请求，避免反向代理把公网请求
+	// 伪装成本机回调。生产环境仍建议配置密钥。
 	AuthSecret string
 	// AuthAllowed 是允许发起鉴权回调的来源网段白名单。
 	AuthAllowed []*net.IPNet
@@ -133,20 +138,39 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 默认只信任本机与内网网段：鉴权回调绝不应该被公网直接访问。
-	cidrs := envList("MEDIAMTX_AUTH_ALLOWED_CIDRS")
-	if len(cidrs) == 0 {
-		cidrs = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+	// 默认只信任本机：MediaMTX 与 tinycast 通常在同一台机器上。
+	// Docker 等跨容器部署必须显式配置 MEDIAMTX_AUTH_ALLOWED_CIDRS（compose 已配）。
+	allowed, err := parseCIDRs("MEDIAMTX_AUTH_ALLOWED_CIDRS", []string{"127.0.0.0/8", "::1/128"})
+	if err != nil {
+		return nil, err
 	}
-	for _, raw := range cidrs {
-		_, network, err := net.ParseCIDR(raw)
-		if err != nil {
-			return nil, fmt.Errorf("config: MEDIAMTX_AUTH_ALLOWED_CIDRS 含非法网段 %q: %w", raw, err)
-		}
-		cfg.MediaMTX.AuthAllowed = append(cfg.MediaMTX.AuthAllowed, network)
+	cfg.MediaMTX.AuthAllowed = allowed
+
+	// 默认只信任本机反代。部署在 nginx/caddy 后面时，这些代理会把公网请求
+	// 的 RemoteAddr 变成本机地址，必须靠 X-Forwarded-For 还原真实来源。
+	trusted, err := parseCIDRs("TRUSTED_PROXIES", []string{"127.0.0.0/8", "::1/128"})
+	if err != nil {
+		return nil, err
 	}
+	cfg.TrustedProxies = trusted
 
 	return cfg, nil
+}
+
+func parseCIDRs(key string, def []string) ([]*net.IPNet, error) {
+	raw := envList(key)
+	if len(raw) == 0 {
+		raw = def
+	}
+	out := make([]*net.IPNet, 0, len(raw))
+	for _, item := range raw {
+		_, network, err := net.ParseCIDR(item)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s 含非法网段 %q: %w", key, item, err)
+		}
+		out = append(out, network)
+	}
+	return out, nil
 }
 
 func envString(key, def string) string {
@@ -167,20 +191,6 @@ func envDuration(key string, def time.Duration) time.Duration {
 	// 允许直接写秒数，例如 ROOM_GRACE=300。
 	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 		return time.Duration(secs) * time.Second
-	}
-	return def
-}
-
-func envBool(key string, def bool) bool {
-	v, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(v) == "" {
-		return def
-	}
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
 	}
 	return def
 }

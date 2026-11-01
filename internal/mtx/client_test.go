@@ -48,6 +48,39 @@ func TestQueryValue(t *testing.T) {
 	}
 }
 
+func TestDecodeRoomValue(t *testing.T) {
+	cases := map[string]string{
+		"测试直播":                           "测试直播",
+		"%E6%B5%8B%E8%AF%95":             "测试",
+		"%25E6%25B5%258B%25E8%25AF%2595": "测试",
+		"100%":                           "100%",
+	}
+	for raw, want := range cases {
+		if got := DecodeRoomValue(raw); got != want {
+			t.Fatalf("DecodeRoomValue(%q) = %q，期望 %q", raw, got, want)
+		}
+	}
+}
+
+func TestClientGlobalConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/config/global/get" {
+			t.Errorf("请求路径异常：%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"authHTTPAddress\":\"http://127.0.0.1:18855/internal/mtx/auth\"}"))
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "", "").GlobalConfig(context.Background())
+	if err != nil {
+		t.Fatalf("GlobalConfig: %v", err)
+	}
+	if got.AuthHTTPAddress != "http://127.0.0.1:18855/internal/mtx/auth" {
+		t.Fatalf("回调地址解析错误：%q", got.AuthHTTPAddress)
+	}
+}
+
 const pathsBody = `{
   "itemCount": 1,
   "pageCount": 1,
