@@ -102,14 +102,14 @@ func TestParseConsoleLevel(t *testing.T) {
 
 func TestParseLogLevel(t *testing.T) {
 	cases := map[string]slog.Level{
-		"":         slog.LevelInfo,
+		"":         slog.LevelError,
 		"info":     slog.LevelInfo,
 		"DEBUG":    slog.LevelDebug,
 		" debug ":  slog.LevelDebug,
 		"warn":     slog.LevelWarn,
 		"warning":  slog.LevelWarn,
 		"error":    slog.LevelError,
-		"nonsense": slog.LevelInfo,
+		"nonsense": slog.LevelError,
 	}
 	for raw, want := range cases {
 		if got := parseLogLevel(raw); got != want {

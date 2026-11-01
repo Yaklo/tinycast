@@ -20,8 +20,8 @@ services:
     environment:
       HTTP_ADDR: ":18855"
       LOG_FILE: /var/log/tinycast/tinycast.log
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      LOG_CONSOLE_LEVEL: ${LOG_CONSOLE_LEVEL:-info}
+      LOG_LEVEL: ${LOG_LEVEL:-error}
+      LOG_CONSOLE_LEVEL: ${LOG_CONSOLE_LEVEL:-error}
       LOG_MAX_MB: ${LOG_MAX_MB:-16}
       LOG_KEEP: ${LOG_KEEP:-3}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}

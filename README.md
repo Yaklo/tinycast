@@ -320,7 +320,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | `HTTP_ADDR` | `:18855` | 监听地址 |
 | `PUBLIC_BASE_URL` | 空 | 对外地址，留空按浏览器地址推断 |
 | `TRUSTED_PROXIES` | 127.0.0.0/8,::1/128 | 只有这些来源的 X-Forwarded-For 才被采信；反代在别的网段时按实际填写 |
-| `LOG_LEVEL` / `LOG_CONSOLE_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 跟随 `LOG_LEVEL` / 空 / `16` / `3` | 文件级别、终端级别与滚动；终端默认与文件一致，设 `LOG_CONSOLE_LEVEL=error` 可只看报错。Windows/Linux 的启动脚本会在 MediaMTX 日志超过 16 MB 时滚动，保留三份 |
+| `LOG_LEVEL` / `LOG_CONSOLE_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `error` / 跟随 `LOG_LEVEL` / 空 / `16` / `3` | 默认只记录 error；排查时把 `LOG_LEVEL` 设为 info/debug。`LOG_CONSOLE_LEVEL` 留空跟随 `LOG_LEVEL`。Windows/Linux 的启动脚本会在 MediaMTX 日志超过 16 MB 时滚动，保留三份 |
 | `ROOM_GRACE` | `5m` | 断流保留时长 |
 | `MONITOR_INTERVAL` | `1s` | 轮询 MediaMTX 路径的间隔 |
 | `VIEWER_TIMEOUT` | `30s` | 心跳超时 |
@@ -393,7 +393,7 @@ dist/                    发布产物（不入库）
 - **人数靠心跳**：HLS 会话按请求创建、数量不可靠，因此用稳定 `viewerId` + 心跳，两种通道统一计数。
 - **媒体反代**：浏览器只和 18855 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
 - **令牌哈希**：服务端只存 SHA-256，房间列表与日志都不出现明文。
-- **终端默认可见**：终端与 `LOG_FILE` 默认使用同一个 `LOG_LEVEL`，排查时不用再去翻文件；需要安静（例如交给 systemd）时设 `LOG_CONSOLE_LEVEL=error`。
+- **默认安静**：终端与 `LOG_FILE` 默认只记录 error，正常运行时不会刷屏；排查时把 `LOG_LEVEL` 改成 info/debug，`LOG_CONSOLE_LEVEL` 留空会跟着变。
 
 ## 故障排查
 

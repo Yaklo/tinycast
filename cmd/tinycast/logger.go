@@ -12,7 +12,7 @@ import (
 )
 
 // parseConsoleLevel 解析终端级别。未配置时跟随文件级别，
-// 这样"终端没输出、文件里却有日志"不会再次发生；需要安静时显式设 LOG_CONSOLE_LEVEL=error。
+// 这样"终端没输出、文件里却有日志"不会再次发生；想看详细输出时设 info/debug。
 func parseConsoleLevel(raw string, fallback slog.Level) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
@@ -30,22 +30,24 @@ func parseConsoleLevel(raw string, fallback slog.Level) slog.Level {
 	}
 }
 
-// parseLogLevel 把 LOG_LEVEL 解析成级别，无法识别时按 info 处理。
+// parseLogLevel 把 LOG_LEVEL 解析成级别，未配置或无法识别时按 error 处理。
 func parseLogLevel(raw string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "debug":
 		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
 	case "warn", "warning":
 		return slog.LevelWarn
 	case "error":
 		return slog.LevelError
 	default:
-		return slog.LevelInfo
+		return slog.LevelError
 	}
 }
 
 // newLogger 构造日志器：终端级别默认与文件一致（LOG_LEVEL），
-// 可用 LOG_CONSOLE_LEVEL 单独调低；配置了 LOG_FILE 时再按大小滚动落盘。
+// 可用 LOG_CONSOLE_LEVEL 单独调整；配置了 LOG_FILE 时再按大小滚动落盘。
 func newLogger() (*slog.Logger, io.Closer, error) {
 	level := parseLogLevel(os.Getenv("LOG_LEVEL"))
 	console := parseConsoleLevel(os.Getenv("LOG_CONSOLE_LEVEL"), level)

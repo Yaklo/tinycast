@@ -168,9 +168,8 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
       HLS 不读 LL-HLS 分片）；看 H.265 时不要改，Safari 的 MSE 只解 H.264。
 
   ⑥ 想看更详细的日志
-     控制台与 logs\tinycast.log 默认内容一致（按 LOG_MAX_MB 自动滚动，保留 LOG_KEEP 份）；
-     只想看报错就在 tinycast.env 设 LOG_CONSOLE_LEVEL=error；
-     想看每一步在做什么，把 LOG_LEVEL 改成 debug 再重启；
+     控制台与 logs\tinycast.log 默认只记录 error（按 LOG_MAX_MB 自动滚动，保留 LOG_KEEP 份）；
+     想看每一步在做什么，把 LOG_LEVEL 改成 info 或 debug 再重启（LOG_CONSOLE_LEVEL 留空会跟随）；
      MediaMTX 的日志在 logs\mediamtx.log（每次启动超过 16 MB 会换新文件，保留三份），
      或直接看它的窗口。
 
