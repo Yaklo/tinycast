@@ -48,7 +48,7 @@ export interface RoomResponse {
  * 播放方式。
  *
  * - hls：默认。延迟约 1 秒，有声音，支持 H.264 / H.265 / AV1（取决于浏览器解码能力）。
- * - webrtc：低延迟（约 0.3 秒）。MediaMTX 不做转码，AAC 音频在 WebRTC 里拿不到声音。
+ * - webrtc：最低延迟（约 0.3 秒）。MediaMTX 不做转码，AAC 音频在 WebRTC 里拿不到声音。
  * - none：后端两侧代理都没配置，说明部署不完整。
  */
 export type PlayProtocol = 'hls' | 'webrtc' | 'none'

@@ -75,11 +75,11 @@ describe('resolveEngine', () => {
     expect(decision.notice).toContain('原生')
   })
 
-  it('用户选 HLS.js 且既没有 MSE 也没有原生：提示改用低延迟通道', () => {
+  it('用户选 HLS.js 且既没有 MSE 也没有原生：提示改用 WebRTC 通道', () => {
     const decision = resolveEngine(context({ pref: 'js', mseSupported: false, canPlayNative: false }))
     expect(decision.engine).toBe('js')
     expect(decision.overridden).toBe(true)
-    expect(decision.notice).toContain('低延迟')
+    expect(decision.notice).toContain('WebRTC')
   })
 
   it('用户选原生：Safari 上照办', () => {

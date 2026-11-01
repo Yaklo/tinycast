@@ -8,12 +8,12 @@ import { ENGINE_OPTIONS, engineLabel, isSafariLike, mseSupported, resolveEngine 
 import type { Engine, EnginePref } from '../lib/engine'
 import { deliveryLabel, firstVariantUrl, hasLowLatencyParts } from '../lib/playlist'
 import type { Delivery } from '../lib/playlist'
-import { TIER_OPTIONS, applyTuning, hlsTuning, shouldUpgradeTier, tierLabel } from '../lib/tuning'
+import { TIER_OPTIONS, hlsTuning, tierLabel } from '../lib/tuning'
 import type { Tier } from '../lib/tuning'
 import type { MediaInfo, Playback, RoomView } from '../types'
 
 /**
- * 双通道播放器。
+ * 三通道播放器（LL-HLS / HLS / WebRTC）。
  *
  * 为什么不只是 WebRTC：MediaMTX 不做转码，浏览器通过 WebRTC 基本只能收 H.264，
  * 而且是照原样转封装——AAC 音频在 WebRTC 里没有对应编码可协商，所以没声音。
@@ -99,13 +99,13 @@ function canUseNative(video?: HTMLVideoElement | null): boolean {
 const TIER_KEY = 'tinycast.playTier'
 const LLHLS_KEY = 'tinycast.llhls'
 
-/** 记住用户选的延迟档位；没选过就用「自动」。 */
+/** 记住用户选的延迟档位；没选过就用「稳定」（默认通道是 LL-HLS）。 */
 function loadTier(): Tier {
   try {
     const stored = localStorage.getItem(TIER_KEY)
-    return stored === 'low' || stored === 'stable' ? stored : 'auto'
+    return stored === 'low' ? 'low' : 'stable'
   } catch {
-    return 'auto'
+    return 'stable'
   }
 }
 
@@ -136,27 +136,80 @@ function saveLlhls(next: boolean): void {
 
 const tier = ref<Tier>(loadTier())
 const llhls = ref<boolean>(loadLlhls())
-/** 自动档是否已经自己放宽过：只存在这次会话里，不写 localStorage，刷新就回到低延时。 */
-const autoUpgraded = ref(false)
-/** 自动放宽的说明。 */
-const tierNotice = ref('')
+/** 播放参数卡片是否展开。 */
+const showSettings = ref(false)
 /** 当前参数表允许的追平阈值（秒），0 表示不再主动追。 */
 let catchUpAfter = 1.8
 
-/** 现在真正生效的参数：档位 + LL-HLS 开关 + 是否已放宽。 */
+/** 现在真正生效的参数：档位 + LL-HLS 开关。 */
 function currentTuning() {
-  return hlsTuning(tier.value, llhls.value, autoUpgraded.value)
+  return hlsTuning(tier.value, llhls.value)
 }
 
 /** 面板里展示的档位文案。 */
-const tierText = computed(() => tierLabel(tier.value, llhls.value, autoUpgraded.value))
+const tierText = computed(() => tierLabel(tier.value, llhls.value))
 
 /** 档位按钮的悬停说明：为什么有时候是灰的。 */
 function tierTitle(value: Tier): string {
+  if (mode.value === 'webrtc') return 'WebRTC 通道不解析分片，延迟档位只在 LL-HLS 下生效'
   if (engine.value === 'native') return '原生播放器自己决定缓冲，档位只在 HLS.js 下生效'
-  if (!llhls.value) return '已关闭 LL-HLS，延迟档位只在 LL-HLS 下生效'
+  if (!llhls.value) return '当前是 HLS 通道（整段分片），延迟档位只在 LL-HLS 下生效'
   return TIER_OPTIONS.find((item) => item.value === value)?.hint ?? ''
 }
+
+/**
+ * 控制栏上的三个通道。
+ *
+ * LL-HLS 与 HLS 都是用分片播放，区别只在「要不要解析 0.2 秒的 LL-HLS 分片」，
+ * 所以它们共用一个 mode='hls'，由 llhls 这个布尔区分；WebRTC 走另一条链路。
+ */
+type Channel = 'llhls' | 'hls' | 'webrtc'
+
+const channel = computed<Channel>(() => {
+  if (mode.value === 'webrtc') return 'webrtc'
+  return llhls.value ? 'llhls' : 'hls'
+})
+
+const CHANNEL_HINTS: Record<Channel, string> = {
+  llhls: 'LL-HLS：0.2 秒一片，延迟 1~3 秒（看档位），有声音，支持 H.264 / H.265',
+  hls: 'HLS：按整段分片缓冲，延迟十秒级，弱网最稳，兼容性最好',
+  webrtc: 'WebRTC：延迟 0.3 秒，但 AAC 音频播不出来，且推流不能带 B 帧',
+}
+
+/** 切通道：LL-HLS 与 HLS 之间只重建一次，避免连撞两次 start()。 */
+function setChannel(next: Channel): void {
+  if (next === channel.value) return
+  if (next === 'webrtc') {
+    switchMode('webrtc')
+    return
+  }
+  const wantLlhls = next === 'llhls'
+  const needMode = mode.value !== 'hls'
+  const needLlhls = llhls.value !== wantLlhls
+  if (!needMode && !needLlhls) return
+  mode.value = 'hls'
+  saveMode('hls')
+  fallbackTried = false
+  autoSwitchNote.value = ''
+  if (needLlhls) {
+    llhls.value = wantLlhls
+    saveLlhls(wantLlhls)
+  }
+  if (props.room.state === 'LIVE') void start()
+  else retry()
+}
+
+/** 播放参数卡片：档位与播放方式都收在这里，不占画面。 */
+function toggleSettings(): void {
+  showSettings.value = !showSettings.value
+}
+
+/** 引擎说明：两种引擎的死角不一样，写清楚比让人猜好。 */
+const engineHint = computed(() =>
+  engine.value === 'native'
+    ? '原生播放器：省电、支持 AirPlay，但拿不到分片指标，延迟由系统决定。'
+    : 'HLS.js：指标全、延迟可控；Safari 上只能解 H.264。',
+)
 
 const muted = ref(true)
 const theater = ref(false)
@@ -166,7 +219,7 @@ const controlsVisible = ref(true)
 let controlsTimer: ReturnType<typeof setTimeout> | null = null
 /** 距离直播边缘的秒数：hls.js 直接给出，原生 HLS 用 seekable 末端估算。 */
 const latencySec = ref(0)
-/** 从低延迟通道自动回退到 HLS 时的说明条。 */
+/** 从 WebRTC 通道自动回退到 LL-HLS 时的说明条。 */
 const autoSwitchNote = ref('')
 
 const HISTORY_LIMIT = 60
@@ -219,8 +272,7 @@ let hlsAudioWindow: { bytes: number; duration: number }[] = []
 let hlsLoads: { bytes: number; ms: number }[] = []
 /** 自动追平直播边缘的节流时间戳。 */
 let lastCatchUp = 0
-/** 最近一分钟里自动追平的次数：追得勤说明网络跟不上，是自动档放宽的依据。 */
-let catchUpJumps: number[] = []
+
 /** 清单给出的直播边缘（媒体时间）与记录时刻，用来算真实延迟。 */
 let edgePos = 0
 let edgeAt = 0
@@ -275,7 +327,7 @@ const grid = computed(() => {
   const s = sample.value
   const media = props.media
   const rows: { label: string; value: string }[] = [
-    { label: '播放通道', value: mode.value === 'hls' ? 'HLS' : 'WebRTC' },
+    { label: '播放通道', value: channel.value === 'llhls' ? 'LL-HLS' : channel.value === 'hls' ? 'HLS' : 'WebRTC' },
     { label: '播放方式', value: mode.value === 'hls' ? engineLabel(engine.value) : 'WebRTC' },
     { label: '分发协议', value: deliveryLabel(delivery.value) },
     { label: '延迟档位', value: mode.value === 'hls' ? tierText.value : '—' },
@@ -448,7 +500,6 @@ async function start(): Promise<void> {
   hlsAudioWindow = []
   hlsLoads = []
   lastCatchUp = 0
-  catchUpJumps = []
   edgePos = 0
   edgeAt = 0
   engine.value = ''
@@ -795,7 +846,6 @@ function catchUp(): void {
   const now = Date.now()
   if (now - lastCatchUp < 6000) return
   lastCatchUp = now
-  catchUpJumps = [...catchUpJumps, now]
   seekLive()
 }
 
@@ -840,35 +890,8 @@ async function sampleOnce(token: number): Promise<void> {
   sample.value = next
   history.value = [...history.value, next].slice(-HISTORY_LIMIT)
   trackProgress(next, now)
-  if (mode.value === 'hls') maybeAutoUpgrade()
 }
 
-/**
- * 自动档：网络跟不上时把参数放宽到「稳定」那一档。
- *
- * 只放宽、不降回，也不重建实例——重建会黑屏闪一下，而这里真正要做的是
- * 「别再强行追平 + 允许更大的缓冲」，改 config 立刻生效：hls.js 的延迟控制器
- * 每轮采样都会重读 liveSyncDuration / liveMaxLatencyDuration。
- */
-function maybeAutoUpgrade(): void {
-  if (tier.value !== 'auto' || autoUpgraded.value || !llhls.value) return
-  const video = videoEl.value
-  // 起播头几秒缓冲和码率都在爬坡，这时候判断只会误伤：先让画面稳稳播 8 秒。
-  if (!video || video.readyState < 2 || video.currentTime < 8) return
-  const recent = history.value
-    .slice(-15)
-    .filter((item) => item.framesDecoded > 0 && item.bufferMs > 0)
-  const now = Date.now()
-  const jumps = catchUpJumps.filter((at) => now - at < 60000).length
-  const verdict = shouldUpgradeTier(recent, jumps)
-  if (!verdict.upgrade) return
-
-  autoUpgraded.value = true
-  const next = currentTuning()
-  catchUpAfter = next.catchUpAfter
-  if (hls?.config) applyTuning(hls.config, next)
-  tierNotice.value = verdict.reason + '，已自动放宽到稳定档参数（不再强行追平；重选「低延时」可以改回去）。'
-}
 
 /** 最近几个分片的 字节数 / 媒体时长 → 码率（kbps）。 */
 function windowBitrate(window: { bytes: number; duration: number }[]): number {
@@ -967,16 +990,16 @@ function trackProgress(next: StatsSample, now: number): void {
   }
 
   // WebRTC 连上 6 秒还一帧都没有：MediaMTX 多半已经因为 B 帧把会话关掉了。
-  // 与其让观众盯着黑屏，不如自动切回 HLS。
+  // 与其让观众盯着黑屏，不如自动切回 LL-HLS。
   if (mode.value === 'webrtc' && webrtcSince > 0 && frames === 0 && now - webrtcSince > 6000) {
-    autoFallbackFromWebRTC('低延迟通道 6 秒内没有收到画面')
+    autoFallbackFromWebRTC('WebRTC 通道 6 秒内没有收到画面')
   }
 }
 
 /**
- * 低延迟通道取不到画面时自动回退到 HLS。
+ * WebRTC 通道取不到画面时自动回退到 LL-HLS。
  * MediaMTX 检测到 H.264 带 B 帧会直接断开会话，这是最常见的原因。
- * 不写回 localStorage：用户改好 OBS 设置后，下次仍然能一键回到低延迟。
+ * 不写回 localStorage：用户改好 OBS 设置后，下次仍然能一键回到 WebRTC。
  */
 function autoFallbackFromWebRTC(reason: string): boolean {
   if (mode.value !== 'webrtc' || fallbackTried) return false
@@ -984,8 +1007,8 @@ function autoFallbackFromWebRTC(reason: string): boolean {
   fallbackTried = true
   autoSwitchNote.value =
     reason +
-    '，已自动切回 HLS。最常见的原因是 OBS 的 H.264 开着 B 帧：把 输出 → 高级 →「最大 B 帧数」设为 0' +
-    '（x264 自定义选项写 bframes=0）后重新推流，再点「低延迟」即可。'
+    '，已自动切回 LL-HLS。最常见的原因是 OBS 的 H.264 开着 B 帧：把 输出 → 高级 →「最大 B 帧数」设为 0' +
+    '（x264 自定义选项写 bframes=0）后重新推流，再点「WebRTC」即可。'
   mode.value = 'hls'
   if (props.room.state === 'LIVE') void start()
   return true
@@ -1017,31 +1040,14 @@ function restartPlayback(): void {
 /**
  * 换延迟档位。
  *
- * 手动选择会重建一次播放器，这样才能立刻落到该档的目标上（重建会黑屏闪 0.3~1 秒）；
- * 自动档放宽走热调，不重建。
+ * 档位决定目标延迟（1.2 秒 / 3 秒），必须重建一次播放器才能立刻落到新目标上，
+ * 代价是黑屏 0.3~1 秒；只是想换引擎（HLS.js / 原生）不用管这里。
  */
 function setTier(next: Tier): void {
   if (tier.value === next) return
   tier.value = next
   saveTier(next)
-  autoUpgraded.value = false
-  tierNotice.value = ''
   restartPlayback()
-}
-
-/** LL-HLS 开关：关掉就是普通 HLS，三个档位跟着失效。 */
-function setLlhls(next: boolean): void {
-  if (llhls.value === next) return
-  llhls.value = next
-  saveLlhls(next)
-  autoUpgraded.value = false
-  tierNotice.value = ''
-  restartPlayback()
-}
-
-function onLlhlsToggle(event: Event): void {
-  const input = event.target as HTMLInputElement | null
-  setLlhls(Boolean(input?.checked))
 }
 
 /**
@@ -1228,7 +1234,7 @@ onBeforeUnmount(() => {
       <p v-if="issue && issue.level === 'error' && issue.suggestMode" class="codec-hint">
         <span>{{ issue.title }}</span>
         <button type="button" class="overlay-btn" @click="switchMode(issue.suggestMode!)">
-          换到 {{ issue.suggestMode === 'hls' ? 'HLS' : '低延迟' }}
+          换到 {{ issue.suggestMode === 'hls' ? 'HLS' : 'WebRTC' }}
         </button>
       </p>
 
@@ -1239,37 +1245,32 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="mode-btn"
-            :class="{ active: mode === 'hls' }"
+            :class="{ active: channel === 'llhls' }"
             :disabled="!playback?.hlsUrl"
-            title="HLS：约 1 秒延迟，有声音，支持 H.264 / H.265"
-            @click="switchMode('hls')"
+            :title="CHANNEL_HINTS.llhls"
+            @click="setChannel('llhls')"
+          >
+            LL-HLS
+          </button>
+          <button
+            type="button"
+            class="mode-btn"
+            :class="{ active: channel === 'hls' }"
+            :disabled="!playback?.hlsUrl"
+            :title="CHANNEL_HINTS.hls"
+            @click="setChannel('hls')"
           >
             HLS
           </button>
           <button
             type="button"
             class="mode-btn"
-            :class="{ active: mode === 'webrtc' }"
+            :class="{ active: channel === 'webrtc' }"
             :disabled="!playback?.whepUrl"
-            title="WebRTC：约 0.3 秒延迟，但 AAC 音频播不出来"
-            @click="switchMode('webrtc')"
+            :title="CHANNEL_HINTS.webrtc"
+            @click="setChannel('webrtc')"
           >
-            低延迟
-          </button>
-        </div>
-
-        <div v-if="mode === 'hls'" class="mode-switch tier-switch" role="group" aria-label="延迟档位">
-          <button
-            v-for="option in TIER_OPTIONS"
-            :key="option.value"
-            type="button"
-            class="tier-btn"
-            :class="{ active: tier === option.value }"
-            :disabled="!llhls || engine === 'native'"
-            :title="tierTitle(option.value)"
-            @click="setTier(option.value)"
-          >
-            {{ option.label }}
+            WebRTC
           </button>
         </div>
 
@@ -1290,6 +1291,15 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="ctrl"
+          :class="{ on: showSettings }"
+          title="播放参数"
+          @click="toggleSettings"
+        >
+          ⚙
+        </button>
+        <button
+          type="button"
+          class="ctrl"
           :class="{ on: showStats }"
           title="显示播放统计"
           @click="toggleStats"
@@ -1305,6 +1315,56 @@ onBeforeUnmount(() => {
       </div>
 
     </div>
+
+    <aside v-if="showSettings && !theater" class="settings">
+      <div class="settings-head">
+        <p class="settings-title">播放参数</p>
+        <p class="settings-hint">换档位或换播放方式会重建一次播放器（黑屏 0.3~1 秒），选择记在本机。</p>
+      </div>
+      <div v-if="mode === 'hls'" class="settings-body">
+        <div class="settings-row">
+          <span class="settings-label">延迟档位</span>
+          <div class="seg" role="group" aria-label="延迟档位">
+            <button
+              v-for="option in TIER_OPTIONS"
+              :key="option.value"
+              type="button"
+              class="tier-btn"
+              :class="{ active: tier === option.value }"
+              :disabled="!llhls || engine === 'native'"
+              :title="tierTitle(option.value)"
+              @click="setTier(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <p class="settings-note">{{ llhls ? tierText : '当前是 HLS 通道（整段分片），档位不生效。' }}</p>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">播放方式</span>
+          <div class="seg" role="group" aria-label="播放方式">
+            <button
+              v-for="option in ENGINE_OPTIONS"
+              :key="option.value"
+              type="button"
+              class="engine-btn"
+              :class="{ active: enginePref === option.value }"
+              :disabled="option.value === 'native' && !nativeReady"
+              :title="
+                option.value === 'native' && !nativeReady
+                  ? '这个浏览器没有原生 HLS 播放能力（只有 Safari / iOS 有）'
+                  : option.hint
+              "
+              @click="setEngine(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <p class="settings-note">{{ engineHint }}</p>
+        </div>
+      </div>
+      <p v-else class="settings-note">WebRTC 通道既不解析分片、也不经过 HLS.js，所以档位与播放方式在这里不适用。</p>
+    </aside>
 
     <aside v-if="showStats && !theater" class="stats">
       <div class="stats-chart">
@@ -1336,35 +1396,6 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="stats-facts">
-        <div v-if="mode === 'hls'" class="engine-row">
-          <span class="engine-label">播放方式</span>
-          <div class="engine-switch" role="group" aria-label="播放方式">
-            <button
-              v-for="option in ENGINE_OPTIONS"
-              :key="option.value"
-              type="button"
-              class="engine-btn"
-              :class="{ active: enginePref === option.value }"
-              :disabled="option.value === 'native' && !nativeReady"
-              :title="
-                option.value === 'native' && !nativeReady
-                  ? '这个浏览器没有原生 HLS 播放能力（只有 Safari / iOS 有）'
-                  : option.hint
-              "
-              @click="setEngine(option.value)"
-            >
-              {{ option.label }}
-            </button>
-          </div>
-        </div>
-        <div v-if="mode === 'hls'" class="engine-row">
-          <span class="engine-label">LL-HLS</span>
-          <label class="toggle">
-            <input type="checkbox" :checked="llhls" @change="onLlhlsToggle" />
-            <span>{{ llhls ? '已开启：0.2 秒分片，延迟 1 秒级' : '已关闭：普通 HLS，延迟约 10 秒，弱网更稳' }}</span>
-          </label>
-        </div>
-        <p v-if="mode === 'hls' && tierNotice" class="stats-note engine-notice">{{ tierNotice }}</p>
         <p v-if="engineNotice" class="stats-note engine-notice">{{ engineNotice }}</p>
         <dl class="stats-grid">
           <template v-for="row in grid" :key="row.label">
@@ -1373,7 +1404,7 @@ onBeforeUnmount(() => {
           </template>
         </dl>
         <p v-if="mode === 'hls'" class="stats-note">
-          HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「低延迟」通道。
+          HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「WebRTC」通道。
           <template v-if="engine === 'native'">
             原生播放器不把分片信息交给页面，所以码率、下载速率这类指标为空；它也可能按整段分片播放，延迟由系统决定。
           </template>
@@ -1626,24 +1657,14 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
-.tier-switch {
-  border-color: rgba(148, 163, 184, 0.28);
-}
-
-.toggle {
+/* 「播放参数」卡片里的分段按钮：和播放器上的通道开关同一套观感。 */
+.seg {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-  cursor: pointer;
-}
-
-.toggle input {
-  width: 14px;
-  height: 14px;
-  accent-color: #818cf8;
-  cursor: pointer;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid var(--line);
+  justify-self: start;
 }
 
 .media-chip {
@@ -1718,24 +1739,64 @@ onBeforeUnmount(() => {
   color: var(--muted);
 }
 
-.engine-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+/* 播放参数卡片：档位与播放方式各自一块，收在播放器下方，不挡画面。 */
+.settings {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(12, 18, 28, 0.92);
 }
 
-.engine-label {
+.settings-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.settings-body {
+  display: grid;
+  gap: 14px;
+}
+
+@media (min-width: 720px) {
+  .settings-body {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+.settings-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-label {
   font-size: 11.5px;
   color: var(--text-faint);
 }
 
-.engine-switch {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.8);
-  border: 1px solid var(--line);
+.settings-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .engine-btn {

@@ -82,7 +82,7 @@ export function resolveEngine(ctx: EngineContext): EngineDecision {
       overridden: true,
       notice: ctx.mseSupported
         ? '这个浏览器没有原生 HLS 播放能力，已改用 HLS.js。'
-        : '这个浏览器既没有原生 HLS 也没有 MSE，HLS 放不出来，请改用「低延迟」通道。',
+        : '这个浏览器既没有原生 HLS 也没有 MSE，HLS 放不出来，请改用「WebRTC」通道。',
     }
   }
 
@@ -98,7 +98,7 @@ export function resolveEngine(ctx: EngineContext): EngineDecision {
       return {
         engine: 'js',
         overridden: true,
-        notice: '这个浏览器缺少 MSE，HLS 放不出来，请改用「低延迟」通道或换浏览器。',
+        notice: '这个浏览器缺少 MSE，HLS 放不出来，请改用「WebRTC」通道或换浏览器。',
       }
     }
     return {

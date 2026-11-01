@@ -232,7 +232,7 @@ describe('LivePlayer', () => {
 
     expect(hlsLog.loadSource).toEqual(['/hls/live/alex/index.m3u8'])
     expect(hlsLog.attachMedia).toBe(1)
-    expect(wrapper.findAll('.mode-btn').map((node) => node.text())).toEqual(['HLS', '低延迟'])
+    expect(wrapper.findAll('.mode-btn').map((node) => node.text())).toEqual(['LL-HLS', 'HLS', 'WebRTC'])
     expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
   })
 
@@ -292,18 +292,18 @@ describe('LivePlayer', () => {
     expect(wrapper.find('.controls').attributes('style') ?? '').not.toContain('display: none')
   })
 
-  it('两个通道都可用时可以切换到低延迟', async () => {
+  it('三个通道都可用时可以切到 WebRTC', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls', true))
     const wrapper = mountPlayer()
     await flushPromises()
 
-    const lowLatency = wrapper.findAll('.mode-btn').find((node) => node.text() === '低延迟')
-    await lowLatency?.trigger('click')
+    const webrtc = wrapper.findAll('.mode-btn').find((node) => node.text() === 'WebRTC')
+    await webrtc?.trigger('click')
     await flushPromises()
 
     expect(fetchPlayMock).toHaveBeenCalledTimes(2)
-    expect(wrapper.findAll('.mode-btn')[1].classes()).toContain('active')
-    expect(wrapper.find('.stats-grid').exists() || true).toBe(true)
+    expect(wrapper.findAll('.mode-btn')[2].classes()).toContain('active')
+    expect(localStorage.getItem('tinycast.playMode')).toBe('webrtc')
   })
 
   it('HLS 落后直播边缘时给出追平按钮，并显示直播延迟', async () => {
@@ -329,13 +329,13 @@ describe('LivePlayer', () => {
     await flushPromises()
   })
 
-  it('WebRTC 连上却收不到画面时自动切回 HLS', async () => {
+  it('WebRTC 连上却收不到画面时自动切回 LL-HLS', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls', true))
     const wrapper = mountPlayer()
     await flushPromises()
 
-    const lowLatency = wrapper.findAll('.mode-btn').find((node) => node.text() === '低延迟')
-    await lowLatency?.trigger('click')
+    const webrtc = wrapper.findAll('.mode-btn').find((node) => node.text() === 'WebRTC')
+    await webrtc?.trigger('click')
     await flushPromises()
 
     for (let tick = 0; tick < 7; tick++) {
@@ -344,7 +344,7 @@ describe('LivePlayer', () => {
     }
 
     expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
-    expect(wrapper.text()).toContain('已自动切回 HLS')
+    expect(wrapper.text()).toContain('已自动切回 LL-HLS')
     expect(wrapper.text()).toContain('B 帧')
     expect(hlsLog.loadSource.length).toBeGreaterThan(1)
   })
@@ -370,12 +370,12 @@ describe('LivePlayer', () => {
     expect(grid).toContain('LL-HLS')
   })
 
-  it('统计面板里可以切换播放方式并记住选择', async () => {
+  it('播放参数卡片里可以切换播放方式并记住选择', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
     await flushPromises()
 
-    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
     await flushPromises()
 
     const engines = wrapper.findAll('.engine-btn')
@@ -415,8 +415,8 @@ describe('LivePlayer', () => {
     const wrapper = mountPlayer()
     await flushPromises()
 
-    const lowLatency = wrapper.findAll('.mode-btn').find((node) => node.text() === '低延迟')
-    await lowLatency?.trigger('click')
+    const webrtc = wrapper.findAll('.mode-btn').find((node) => node.text() === 'WebRTC')
+    await webrtc?.trigger('click')
     await flushPromises()
 
     expect(localStorage.getItem('tinycast.playMode')).toBe('webrtc')
@@ -425,7 +425,7 @@ describe('LivePlayer', () => {
     const second = mountPlayer()
     await flushPromises()
 
-    expect(second.findAll('.mode-btn')[1].classes()).toContain('active')
+    expect(second.findAll('.mode-btn')[2].classes()).toContain('active')
   })
 
   it('网页全屏会锁住页面滚动，按 Esc 恢复', async () => {
@@ -469,55 +469,59 @@ describe('LivePlayer', () => {
     expect(wrapper.find('.overlay').text()).toContain('UDP 8000')
   })
 
-  it('延迟档位：默认自动，按 1.2 秒目标起播', async () => {
+  it('默认走 LL-HLS 的稳定档，按 3 秒目标起播', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
     await flushPromises()
-
-    const tiers = wrapper.findAll('.tier-btn')
-    expect(tiers.map((node) => node.text())).toEqual(['自动', '低延时', '稳定'])
-    expect(tiers[0].classes()).toContain('active')
 
     const instance = hlsLog.instances[0] as { config: Record<string, unknown> }
     expect(instance.config.lowLatencyMode).toBe(true)
-    expect(instance.config.liveSyncDuration).toBe(1.2)
-    expect(instance.config.liveMaxLatencyDuration).toBe(6)
-    // 两个都给会被 hls.js 判成非法配置
-    expect(instance.config.liveSyncDurationCount).toBeUndefined()
-  })
-
-  it('选「稳定」后按 3 秒目标重建，并记住选择', async () => {
-    fetchPlayMock.mockResolvedValue(playResponse('hls'))
-    const wrapper = mountPlayer()
-    await flushPromises()
-
-    const stable = wrapper.findAll('.tier-btn').find((node) => node.text() === '稳定')
-    await stable?.trigger('click')
-    await flushPromises()
-
-    expect(localStorage.getItem('tinycast.playTier')).toBe('stable')
-    expect(fetchPlayMock).toHaveBeenCalledTimes(2)
-
-    const instance = hlsLog.instances[hlsLog.instances.length - 1] as { config: Record<string, unknown> }
     expect(instance.config.liveSyncDuration).toBe(3)
     expect(instance.config.liveMaxLatencyDuration).toBe(12)
     expect(instance.config.maxBufferLength).toBe(6)
+    // 两个都给会被 hls.js 判成非法配置
+    expect(instance.config.liveSyncDurationCount).toBeUndefined()
 
-    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.stats-grid').text()).toContain('稳定（3 秒）')
+
+    const tiers = wrapper.findAll('.tier-btn')
+    expect(tiers.map((node) => node.text())).toEqual(['低延时', '稳定'])
+    expect(tiers[1].classes()).toContain('active')
   })
 
-  it('关闭 LL-HLS 后改用普通 HLS，延迟档位置灰', async () => {
+  it('在播放参数卡片里选「低延时」会按 1.2 秒目标重建，并记住选择', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
     await flushPromises()
 
-    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
     await flushPromises()
 
-    const toggle = wrapper.find('.toggle input')
-    await toggle.setValue(false)
+    const low = wrapper.findAll('.tier-btn').find((node) => node.text() === '低延时')
+    await low?.trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem('tinycast.playTier')).toBe('low')
+    expect(fetchPlayMock).toHaveBeenCalledTimes(2)
+
+    const instance = hlsLog.instances[hlsLog.instances.length - 1] as { config: Record<string, unknown> }
+    expect(instance.config.liveSyncDuration).toBe(1.2)
+    expect(instance.config.liveMaxLatencyDuration).toBe(6)
+    expect(instance.config.maxBufferLength).toBe(4)
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.stats-grid').text()).toContain('低延时（1.2 秒）')
+  })
+
+  it('切到 HLS 通道后改用整段分片，延迟档位置灰', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const hlsButton = wrapper.findAll('.mode-btn').find((node) => node.text() === 'HLS')
+    await hlsButton?.trigger('click')
     await flushPromises()
 
     expect(localStorage.getItem('tinycast.llhls')).toBe('off')
@@ -526,9 +530,15 @@ describe('LivePlayer', () => {
     expect(instance.config.liveSyncDurationCount).toBe(3)
     expect(instance.config.liveSyncDuration).toBeUndefined()
 
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
+    await flushPromises()
     for (const node of wrapper.findAll('.tier-btn')) {
       expect(node.attributes('disabled')).toBeDefined()
     }
+    expect(wrapper.find('.settings').text()).toContain('档位不生效')
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
     expect(wrapper.find('.stats-grid').text()).toContain('普通 HLS（档位不生效）')
   })
 
