@@ -8,7 +8,13 @@
 
 services:
   tinycast:
-    build: .
+    build:
+      context: .
+      # 镜像里没有 .git，版本号由这里注入；打包前可 export TINYCAST_VERSION=v0.1.0
+      args:
+        VERSION: ${TINYCAST_VERSION:-devel}
+        COMMIT: ${TINYCAST_COMMIT:-}
+        BUILD_TIME: ${TINYCAST_BUILD_TIME:-}
     image: tinycast:latest
     restart: unless-stopped
     environment:

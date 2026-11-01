@@ -3,6 +3,8 @@
 
 # Go 构建产物
 /bin/
+# 发布产物（tar.gz / zip / SHA256SUMS）
+/dist/
 *.exe
 *.test
 *.out

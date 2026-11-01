@@ -6,10 +6,14 @@
 #   ./scripts/build.sh --windows                # 交叉编译 Windows 运行包到 bin/windows-amd64/
 #   GOOS=linux GOARCH=arm64 ./scripts/build.sh  # 其它平台交叉编译
 #   SKIP_WEB=1 ./scripts/build.sh               # 只构建后端（前端产物已存在时）
+#   VERSION=v0.1.0 ./scripts/build.sh           # 手动指定版本（默认取 git describe）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# shellcheck disable=SC1091
+source scripts/release-env.sh
 
 for arg in "$@"; do
   case "$arg" in
@@ -44,7 +48,7 @@ if [[ "${SKIP_WEB:-0}" != "1" ]]; then
 fi
 
 SUFFIX=""
-OUTDIR="bin"
+OUTDIR="${OUTDIR:-bin}"
 if [[ "${GOOS:-}" == "windows" ]]; then
   SUFFIX=".exe"
   # WIN_OUTDIR 供打包脚本换成临时目录（例如目标目录里的 exe 正在 Windows 上运行）
@@ -54,8 +58,12 @@ if [[ "${GOOS:-}" == "windows" ]]; then
   rm -f "$OUTDIR"/*.exe "$OUTDIR"/*.cmd "$OUTDIR"/*.txt "$OUTDIR"/*.env
 fi
 
-echo "==> 构建后端 ${GOOS:-本机}/${GOARCH:-本机}"
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinycast$SUFFIX" ./cmd/tinycast
+echo "==> 构建后端 ${GOOS:-本机}/${GOARCH:-本机} 版本 $VERSION ($COMMIT)"
+LDFLAGS=(-s -w
+  -X "tinycast/internal/version.Version=$VERSION"
+  -X "tinycast/internal/version.Commit=$COMMIT"
+  -X "tinycast/internal/version.BuildTime=$BUILD_TIME")
+CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS[*]}" -o "$OUTDIR/tinycast$SUFFIX" ./cmd/tinycast
 
 if [[ "${GOOS:-}" == "windows" ]]; then
   # Windows 运行包：tinycast.exe + MediaMTX（需先跑 fetch-mediamtx-windows.sh）+ 启动脚本 + 说明

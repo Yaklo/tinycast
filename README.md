@@ -59,7 +59,35 @@ docker compose up -d --build
 正式部署记得改 `deploy/mediamtx/mediamtx.docker.yml` 里的 `webrtcAdditionalHosts` 与 compose 里的
 `MEDIAMTX_RTMP_PUBLIC_BASE`，否则观众拿到的候选地址仍是 `127.0.0.1`。
 
+## 发布与版本
+
+版本号只有一个来源：git tag（`v0.1.0` 这种形式）。构建脚本用 `git describe` 取值，再通过
+`-ldflags -X` 写进二进制，所以每个产物都能自己报出版本。
+
+```bash
+./scripts/package-release.sh      # Linux 包 + Windows 包 + 校验和，全部落在 dist/
+```
+
+| 产物 | 说明 |
+| --- | --- |
+| `dist/tinycast-<版本>-linux-amd64.tar.gz` | tinycast + MediaMTX + 配置样例 + systemd 单元 + `start.sh` |
+| `dist/tinycast-<版本>-windows-amd64.zip` | 双击 `start-all.cmd` 即用，见包内 `部署说明.txt` |
+| `dist/SHA256SUMS` | 校验和，`sha256sum -c SHA256SUMS` 验证 |
+
+查询版本：
+
+```bash
+./tinycast -version     # v0.1.0 (rev b6da756, 2026-11-02T03:00:00Z, go1.24.7)
+curl -s localhost:18855/api/version
+```
+
+工作区有未提交改动时版本会带 `-dirty` 后缀，发布前请确认 `git status` 干净。
+Docker 镜像里没有 `.git`，版本由 compose 的 `TINYCAST_VERSION` / `TINYCAST_COMMIT` / `TINYCAST_BUILD_TIME` 注入。
+
 ## 手动部署（Linux）
+
+想省事可以直接用发布包：`tinycast-<版本>-linux-amd64.tar.gz` 解压后 `./start.sh`，
+里面已经带了 MediaMTX、配置样例与 systemd 单元。下面是从源码手工部署的步骤。
 
 ```bash
 # MediaMTX：官方单文件程序
@@ -84,7 +112,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now mediamtx tinycast
 ## Windows 运行包
 
 ```bash
-./scripts/package-windows.sh     # 产出 bin/tinycast-windows-amd64.zip（含 mediamtx.exe）
+./scripts/package-windows.sh     # 产出 dist/tinycast-<版本>-windows-amd64.zip（含 mediamtx.exe）
 ```
 
 解压后右键 `open-firewall.cmd` → 以管理员身份运行，再双击 `start-all.cmd`，浏览器会自动打开。
@@ -242,6 +270,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/healthz` | 健康检查 |
+| GET | `/api/version` | 版本信息（版本、提交、构建时间、Go 版本） |
 | GET | `/api/config` | 前端启动配置（app、RTMP 地址、保留秒数、可用通道） |
 | GET | `/api/rooms` | 房间列表（只含 LIVE 与 GRACE） |
 | GET | `/api/rooms/{username}` | 房间详情 |
@@ -283,6 +312,10 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 source scripts/dev-env.sh          # 把工具链指到仓库内的 .tools
 ./scripts/dev.sh                   # 同时启动 go run 与 pnpm dev
 
+# 构建与版本
+./scripts/build.sh                 # 构建到 bin/tinycast，版本取自 git describe
+./bin/tinycast -version
+
 # 单独跑
 go run ./cmd/tinycast -open        # 后端 :18855，-open 自动开浏览器
 cd web && pnpm dev                 # 前端 :5173，代理 /api 与 /rtc 到后端
@@ -308,12 +341,15 @@ internal/hub/            内存状态：身份绑定、房间、观看者、SSE 
 internal/monitor/        巡检循环：轮询 MediaMTX、推进房间状态、回收超时
 internal/mtx/            MediaMTX API 客户端（paths、query 解析）
 internal/httpapi/        REST、SSE、鉴权回调、HLS/WHEP 反向代理
+internal/version/        版本信息（构建期注入 + VCS 兜底）
 internal/webui/          go:embed 内嵌前端
 web/                     Vue 3 + TS + Vite 前端
 deploy/mediamtx/         MediaMTX 配置（宿主机 / compose 两份）
 deploy/systemd/          mediamtx.service、tinycast.service、env 样例
 deploy/windows/          Windows 启动脚本与说明
-scripts/                 构建、开发、打包脚本
+deploy/linux/            Linux 发布包的 start.sh 与 env 样例
+scripts/                 构建、开发、打包脚本（package-release.sh 一键出包）
+dist/                    发布产物（不入库）
 ```
 
 ## 设计取舍

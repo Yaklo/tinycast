@@ -3,7 +3,7 @@
 #
 # 用法：./scripts/package-windows.sh            # 首次会联网下载 MediaMTX（约 30MB）
 #       SKIP_WEB=1 ./scripts/package-windows.sh # 前端产物已存在时跳过前端构建
-# 产物：bin/tinycast-windows-amd64.zip（解压即用，目录结构见 deploy/windows/部署说明.txt）
+# 产物：dist/tinycast-<版本>-windows-amd64.zip（解压即用，目录结构见 deploy/windows/部署说明.txt）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,9 +15,14 @@ if [[ -x ".tools/go/bin/go" ]]; then
   source scripts/dev-env.sh >/dev/null
 fi
 
+# shellcheck disable=SC1091
+source scripts/release-env.sh
+
 OUTDIR="bin/windows-amd64"
 STAGE=".tools/winpkg-stage"
-ZIP="bin/tinycast-windows-amd64.zip"
+DIST="${DIST:-dist}"
+ZIP="$DIST/tinycast-${VERSION}-windows-amd64.zip"
+mkdir -p "$DIST"
 
 if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
   echo "==> 首次构建，先获取 MediaMTX 的 Windows 版本"
@@ -39,6 +44,10 @@ WIN_OUTDIR="$WIN_OUTDIR" ./scripts/build.sh --windows
 
 # 运行时日志不进压缩包（启动脚本会自己创建 logs 目录）
 rm -rf "$WIN_OUTDIR/logs"
+
+# 包里放一份版本信息，用户报障时能直接对上是哪一版
+printf 'version:   %s\r\ncommit:    %s\r\nbuildTime: %s\r\n' \
+  "$VERSION" "$COMMIT" "$BUILD_TIME" > "$WIN_OUTDIR/version.txt"
 
 echo "==> 打包 $ZIP"
 python3 - "$WIN_OUTDIR" "$ZIP" <<'PY'

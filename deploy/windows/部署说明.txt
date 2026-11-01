@@ -8,12 +8,14 @@ TinyCast Windows 运行包使用说明
     - tinycast.exe：负责推流鉴权、房间状态、在线人数、网页。
   不需要数据库，不需要 Docker、Node.js 或 Visual Studio。
   关掉窗口后所有房间状态就没了，这是刻意保持的轻量设计。
+  想知道跑的是哪个版本：运行 tinycast.exe -version，或看 version.txt。
 
 
 二、目录结构
 
   tinycast.exe            业务后端（网页也打包在里面）
   tinycast.env            配置，改完要重启 TinyCast 生效
+  version.txt             本次构建的版本号、提交与构建时间
   start-all.cmd           一键启动 MediaMTX + TinyCast（推荐）
   start.cmd               只启动 TinyCast（MediaMTX 已单独在跑时用）
   open-firewall.cmd       放通端口，需要管理员权限
