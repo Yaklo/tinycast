@@ -6,7 +6,8 @@
 #   - api 端口不映射到宿主机，只在 compose 网络内可用；
 #   - webrtcAdditionalHosts 额外带上 localhost，方便本机浏览器测试。
 
-logLevel: info
+# 默认只记录 error；排查时改成 info 或 debug。
+logLevel: error
 logDestinations: [stdout]
 
 # 只在 compose 网络内暴露，docker-compose.yml 不映射该端口

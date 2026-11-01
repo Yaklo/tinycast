@@ -393,7 +393,7 @@ dist/                    发布产物（不入库）
 - **人数靠心跳**：HLS 会话按请求创建、数量不可靠，因此用稳定 `viewerId` + 心跳，两种通道统一计数。
 - **媒体反代**：浏览器只和 18855 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
 - **令牌哈希**：服务端只存 SHA-256，房间列表与日志都不出现明文。
-- **默认安静**：终端与 `LOG_FILE` 默认只记录 error，正常运行时不会刷屏；排查时把 `LOG_LEVEL` 改成 info/debug，`LOG_CONSOLE_LEVEL` 留空会跟着变。
+- **默认安静**：终端与 `LOG_FILE` 默认只记录 error，正常运行时不会刷屏；排查时把 `LOG_LEVEL` 改成 info/debug，`LOG_CONSOLE_LEVEL` 留空会跟着变。MediaMTX 的 `logLevel` 也默认 `error`，需要看媒体细节时改 `deploy/mediamtx/mediamtx.yml`。
 
 ## 故障排查
 

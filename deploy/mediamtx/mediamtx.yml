@@ -6,7 +6,8 @@
 #   2. api 只监听 127.0.0.1 —— 后端要靠它读路径与编码，公网不该看到它；
 #   3. hlsDirectory: "" —— HLS 分片放内存，不落盘。
 
-logLevel: info
+# 默认只记录 error；排查时改成 info 或 debug。
+logLevel: error
 logDestinations: [stdout]
 
 # 供 tinycast 读取路径状态（/v3/paths/list）。默认端口 9997，只给本机。
