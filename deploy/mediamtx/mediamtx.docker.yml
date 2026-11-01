@@ -23,10 +23,12 @@ hlsDirectory: ""
 webrtc: yes
 webrtcAddress: :8889
 webrtcAdditionalHosts: [localhost, 127.0.0.1]
-webrtcICEUDPMuxAddress: :8000
+webrtcLocalUDPAddress: :8000
 
 srt: no
 rtsp: no
+# 不启用 MoQ，省掉 8892/8893 两组端口
+moq: no
 
 authMethod: http
 authHTTPAddress: http://tinycast:8080/internal/mtx/auth

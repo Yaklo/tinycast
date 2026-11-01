@@ -18,26 +18,28 @@ rtmp: yes
 rtmpAddress: :1935
 rtmpEncryption: "no"
 
-# 浏览器播放（经 tinycast 的 /hls/ 反向代理转发，无需单独暴露）
+# 浏览器播放（经 tinycast 的 /hls/ 反向代理转发，因此只监听本机）
 hls: yes
-hlsAddress: :8888
+hlsAddress: 127.0.0.1:8888
 hlsVariant: lowLatency
 hlsPartDuration: 200ms
 hlsSegmentDuration: 1s
 hlsDirectory: ""
 hlsAlwaysRemux: no
 
-# 浏览器播放（经 tinycast 的 /rtc/ 反向代理转发，无需单独暴露）
+# 浏览器播放（经 tinycast 的 /rtc/ 反向代理转发，信令只监听本机）
 webrtc: yes
-webrtcAddress: :8889
+webrtcAddress: 127.0.0.1:8889
 # 观众能访问到的地址。本机测试保持 127.0.0.1；
 # 局域网/公网部署请改成服务器的实际 IP 或域名，例如 [live.example.com]
 webrtcAdditionalHosts: [127.0.0.1]
 # WebRTC 媒体走 UDP 8000，防火墙必须放通
-webrtcICEUDPMuxAddress: :8000
+webrtcLocalUDPAddress: :8000
 
 srt: no
 rtsp: no
+# 不启用 MoQ，省掉 8892/8893 两组端口
+moq: no
 
 # 所有推流/播放请求先问后端；后端按用户名 + 令牌判断能否推流
 authMethod: http
