@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -334,6 +335,56 @@ func TestBroadcastNotifiesSubscribers(t *testing.T) {
 	}
 	if h.SubscriberCount() != 1 {
 		t.Fatalf("订阅者数量应为 1，实际 %d", h.SubscriberCount())
+	}
+}
+
+// 广播与订阅者增删并发时不能崩溃。
+//
+// 回归背景：Broadcast 曾经在锁外遍历 h.watchers，而注销函数会在锁内
+// delete + close，运行时会以 fatal error: concurrent map iteration and
+// map write 直接退出进程（recover 拦不住）；未及时关闭时还会 panic: send on
+// closed channel。本用例在 -race 下必须保持干净。
+func TestBroadcastConcurrentWithSubscribe(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+
+	stop := make(chan struct{})
+	var broadcaster sync.WaitGroup
+	broadcaster.Add(1)
+	go func() {
+		defer broadcaster.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				h.Broadcast()
+			}
+		}
+	}()
+
+	var subscribers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		subscribers.Add(1)
+		go func() {
+			defer subscribers.Done()
+			for j := 0; j < 300; j++ {
+				ch, release := h.Subscribe()
+				select {
+				case <-ch:
+				default:
+				}
+				release()
+			}
+		}()
+	}
+	subscribers.Wait()
+	close(stop)
+	broadcaster.Wait()
+
+	if n := h.SubscriberCount(); n != 0 {
+		t.Fatalf("全部注销后订阅者应为 0，实际 %d", n)
 	}
 }
 

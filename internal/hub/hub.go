@@ -386,7 +386,15 @@ func (h *Hub) Snapshot() Snapshot {
 // 房间数量在个人直播场景下很少，直接"全量广播快照"比维护增量补丁简单得多，
 // 前端也永远只会看到一致的完整状态。
 func (h *Hub) Broadcast() {
+	// Snapshot 内部要拿 RLock，必须在加锁前调用。
 	snap := h.Snapshot()
+
+	// 发送期间必须持锁：Subscribe / 注销函数会并发增删并 close 通道，
+	// 无锁遍历 map 会触发 runtime 的 "concurrent map iteration and map write"
+	// 直接退出进程，向已关闭通道发送则会 panic。
+	// 发送是非阻塞的（缓冲满就丢帧），持锁时间可以忽略。
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for ch := range h.watchers {
 		select {
 		case ch <- snap:
