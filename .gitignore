@@ -19,6 +19,9 @@ internal/webui/dist/*
 .env.local
 *.log
 
+# pnpm/npm 的本地配置（含本机绝对路径，不入库）
+.npmrc
+
 # 编辑器
 .idea/
 .vscode/*
