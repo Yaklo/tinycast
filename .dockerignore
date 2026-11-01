@@ -1,0 +1,12 @@
+# 只把必要内容送进构建上下文
+.git
+.tools
+.github
+bin
+node_modules
+web/node_modules
+web/dist
+internal/webui/dist
+*.log
+.env
+.env.local
