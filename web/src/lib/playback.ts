@@ -118,10 +118,12 @@ export function noFrameHint(media?: MediaInfo | null, mode: PlayMode = 'hls'): s
 
   if (mode === 'webrtc') {
     return (
-      'WebRTC 已连上流媒体服务器，但一直收不到视频帧。常见原因：' +
-      '① 服务器的 UDP 8000 被防火墙/安全组拦住（Windows 请以管理员身份运行 open-firewall.cmd）；' +
-      '② MediaMTX 的 webrtcAdditionalHosts 没配置成观众能访问的地址；' +
-      '③ 编码不是 H.264。可以先切到「HLS」验证一下推流本身是否正常。'
+      'WebRTC 已连上流媒体服务器，但一直收不到视频帧。按顺序排查：' +
+      '① OBS 的 H.264 开了 B 帧——媒体服务会直接断开这种流（日志里是 "doesn\'t support H264 streams with B-frames"），' +
+      '请把 OBS 输出设置里的「最大 B 帧数」改成 0 后重新推流；' +
+      '② 服务器的 UDP 8000 被防火墙/安全组拦住（Windows 请以管理员身份运行 open-firewall.cmd）；' +
+      '③ MediaMTX 的 webrtcAdditionalHosts 没配置成观众能访问的地址；' +
+      '④ 编码不是 H.264。先切到「HLS」可以确认推流本身是否正常（HLS 支持 B 帧与 H.265）。'
     )
   }
 

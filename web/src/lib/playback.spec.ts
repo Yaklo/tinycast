@@ -87,6 +87,7 @@ describe('noFrameHint', () => {
     const hls = noFrameHint(null, 'hls')
     expect(hls).toContain('MEDIAMTX_HLS_PROXY_TARGET')
     const webrtc = noFrameHint(null, 'webrtc')
+    expect(webrtc).toContain('B 帧')
     expect(webrtc).toContain('UDP 8000')
   })
 })

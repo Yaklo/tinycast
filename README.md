@@ -135,13 +135,17 @@ MediaMTX 短暂不可达时保持现状，不会把全部房间打成断流。
 | 通道 | 延迟 | 声音 | H.264 | H.265 | AV1 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
 | HLS（默认） | ~1 秒 | 有 | ✅ | ✅* | ✅* | LL-HLS，分片在内存，不落盘 |
-| WebRTC（低延迟） | ~0.3 秒 | 无 | ✅ | ❌ | ❌ | 媒体透传不转码，浏览器只收 H.264 + Opus 等 |
+| WebRTC（低延迟） | ~0.3 秒 | 无 | ✅（需关闭 B 帧） | ❌ | ❌ | 媒体透传不转码；浏览器只收 H.264，且流里不能有 B 帧 |
 
 \* H.265/AV1 的 HLS 播放依赖系统解码能力：Chrome/Edge（Windows、macOS）与 Safari 正常，
 Linux 下的 Chrome 与 Firefox 通常不行。页面会检测编码并给出“换通道”的提示。
 
 WebRTC 通道没有声音是 MediaMTX 的设计取舍：它不做转码，AAC 无法变成浏览器能协商的编码，
 于是补一条静音的 PCMU 轨让画面能显示。需要声音就用默认 HLS。
+
+**WebRTC 通道还要求 H.264 不带 B 帧**：MediaMTX 检测到 B 帧会直接断开会话（日志里是
+`doesn't support H264 streams with B-frames`）。OBS 里把 输出 → 高级 →「最大 B 帧数」设为 0，
+x264 则在自定义选项里写 `bframes=0`。HLS 没有这个限制，实测 720p60 + 默认 B 帧仍能完整解出 60fps。
 
 ## HTTP 接口
 
@@ -239,6 +243,7 @@ scripts/                 构建、开发、打包脚本
 | OBS 提示连接失败 | 1935 是否放通；推流码是否整段复制；同一身份是否已在推流 |
 | 房间在但画面黑 | 🩺 面板看下载速率与帧率；H.265 在 Linux 浏览器需换 H.264；局域网看 UDP 8000 |
 | 低延迟通道没声音 | 正常现象，MediaMTX 不转码，改用 HLS 通道 |
+| 低延迟通道连上但马上断开 / 没画面 | OBS 的 H.264 默认带 B 帧，MediaMTX 会直接断开会话；把「最大 B 帧数」设为 0 |
 | 人数一直是 0 | 播放器心跳失败：看 `/api/rooms/{u}/watch` 是否 4xx，`VIEWER_TIMEOUT` 是否设得太小 |
 | 断流后房间不消失 | 日志有无“保留期结束，已释放房间”；`ROOM_GRACE` 是否被改大 |
 | 启动报 `mediamtx_unreachable` | `MEDIAMTX_*_PROXY_TARGET` 指向的端口没起，或 MediaMTX 未启动 |

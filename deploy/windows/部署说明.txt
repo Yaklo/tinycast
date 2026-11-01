@@ -78,7 +78,11 @@ TinyCast Windows 运行包使用说明
 
   编码建议：
     - 想要“有声音 + 各平台都能看”，用 H.264 推流，走默认 HLS 通道；
-    - 想要最低延迟，用 H.264 或 H.265 都可以，切到 WebRTC 通道；
+    - 想要最低延迟，必须同时满足两条：视频用 H.264，并且在 OBS 里关掉 B 帧
+      （输出 → 高级 →「最大 B 帧数」改成 0；x264 自定义选项写 bframes=0）。
+      带 B 帧的 H.264 会被媒体服务直接断开会话，日志原文是
+      "doesn't support H264 streams with B-frames"；
+    - HLS 通道不挑这些：带 B 帧、H.265 都能放，所以默认就是 HLS；
     - H.265 在 Chrome / Edge（Windows、macOS）与 Safari 上能通过 HLS 播放，
       Linux 下的 Chrome 与 Firefox 通常解不了，页面会给出提示。
 
@@ -92,6 +96,7 @@ TinyCast Windows 运行包使用说明
      先看 logs\tinycast.log 有没有“推流鉴权通过”和“推流开始”。
      没有“推流鉴权通过”= 推流码不对（令牌不匹配、用户名已被别的令牌占用）。
      有“推流开始”但画面不动 = 浏览器与媒体之间不通，检查：
+       - 用的是 WebRTC 通道？OBS 必须关掉 B 帧（最常见原因，见第六节）；
        - 局域网观看时 UDP 8000 是否放通；
        - mediamtx.yml 的 webrtcAdditionalHosts 是否写成了这台机器的 IP；
        - 是不是 H.265 却在 Linux 浏览器上用 HLS 通道播放。
