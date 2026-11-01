@@ -13,6 +13,8 @@ fi
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    # go run 会再 fork 一个真正的服务进程，先收子进程再收父进程。
+    pkill -P "$SERVER_PID" 2>/dev/null || true
     kill "$SERVER_PID" 2>/dev/null || true
   fi
 }
