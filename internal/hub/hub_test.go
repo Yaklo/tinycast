@@ -1,536 +1,354 @@
 package hub
 
 import (
-	"context"
-	"fmt"
-	"sync"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
 
-// fakeClock 是可手动推进的测试时钟。
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
+// fakeClock 让保留期相关的用例不依赖真实时间。
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func newTestHub() (*Hub, *fakeClock) {
+	clock := &fakeClock{t: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+	h := New(5 * time.Minute)
+	h.now = clock.now
+	return h, clock
 }
 
-func newClock() *fakeClock {
-	return &fakeClock{t: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
-}
+const testToken = "MPA49PxJv0mJd4Wq7yTn1sB8kRc2hVfLgXe6uZa9Q"
 
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-func (c *fakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.t = c.t.Add(d)
-}
-
-func newTestHub(t *testing.T) (*Hub, *fakeClock) {
+func mustBind(t *testing.T, h *Hub, username, room, token, session string) BindResult {
 	t.Helper()
-	clock := newClock()
-	return New(Options{Grace: 5 * time.Minute, Now: clock.Now}), clock
-}
-
-const (
-	testToken = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcd"
-	otherTokn = "ZzYyXxWwVvUuTtSsRrQqPpOoNnMmLlKkJJii9876-"
-)
-
-func mustPublish(t *testing.T, h *Hub, username, room, token, clientID string) PublishResult {
-	t.Helper()
-	res := h.Publish(PublishInput{Username: username, RoomName: room, Token: token, ClientID: clientID})
+	res := h.Bind(BindInput{Username: username, RoomName: room, Token: token, SessionID: session, IP: "127.0.0.1"})
 	if !res.Allowed {
-		t.Fatalf("Publish(%s) 应被放行，实际被拒绝: %s (%s)", username, res.Reason, res.Message)
+		t.Fatalf("鉴权应通过，实际被拒: %s %s", res.Reason, res.Message)
 	}
 	return res
 }
 
-// 推流成功后应当出现一个 LIVE 房间。
-func TestPublishCreatesLiveRoom(t *testing.T) {
-	h, _ := newTestHub(t)
+func TestBindValidatesInput(t *testing.T) {
+	h, _ := newTestHub()
 
-	res := mustPublish(t, h, "alice", "爱丽丝的直播间", testToken, "c1")
-	if res.Room.State != StateLive {
-		t.Fatalf("房间状态应为 LIVE，实际为 %s", res.Room.State)
-	}
-	if res.Room.Room != "爱丽丝的直播间" {
-		t.Fatalf("房间名称不匹配: %q", res.Room.Room)
-	}
-	if res.Room.GraceUntil != 0 {
-		t.Fatalf("LIVE 房间不应带释放时间，实际为 %d", res.Room.GraceUntil)
-	}
-
-	snap := h.Snapshot()
-	if len(snap.Rooms) != 1 {
-		t.Fatalf("快照应包含 1 个房间，实际 %d 个", len(snap.Rooms))
-	}
-}
-
-// 房间名称为空时回退到用户名，保证列表里永远有可读的名称。
-func TestPublishFallsBackToUsername(t *testing.T) {
-	h, _ := newTestHub(t)
-	res := mustPublish(t, h, "alice", "", testToken, "c1")
-	if res.Room.Room != "alice" {
-		t.Fatalf("空房间名应回退为用户名，实际 %q", res.Room.Room)
-	}
-}
-
-func TestPublishRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
-		name     string
-		username string
-		room     string
-		token    string
-		want     Reason
+		name string
+		in   BindInput
+		want Reason
 	}{
-		{"用户名过短", "ab", "房间", testToken, ReasonInvalidUsername},
-		{"用户名含非法字符", "al ice", "房间", testToken, ReasonInvalidUsername},
-		{"用户名带路径分隔符", "al/ice", "房间", testToken, ReasonInvalidUsername},
-		{"令牌过短", "alice", "房间", "short", ReasonInvalidToken},
-		{"令牌含空格", "alice", "房间", "aaaaaaaaaaaaaaaa aaaaa", ReasonInvalidToken},
-		{"房间名过长", "alice", string(make([]rune, MaxRoomNameRunes+1)), testToken, ReasonInvalidRoom},
+		{"用户名过短", BindInput{Username: "ab", Token: testToken}, ReasonInvalidUsername},
+		{"用户名含空格", BindInput{Username: "a b", Token: testToken}, ReasonInvalidUsername},
+		{"令牌过短", BindInput{Username: "alex", Token: "short"}, ReasonInvalidToken},
+		{"令牌含非法字符", BindInput{Username: "alex", Token: "not a token at all!"}, ReasonInvalidToken},
+		{"房间名过长", BindInput{Username: "alex", Token: testToken, RoomName: strings.Repeat("房", 65)}, ReasonInvalidRoom},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _ := newTestHub(t)
-			res := h.Publish(PublishInput{Username: tc.username, RoomName: tc.room, Token: tc.token, ClientID: "c1"})
+			res := h.Bind(tc.in)
 			if res.Allowed {
-				t.Fatalf("%s 应被拒绝，实际被放行", tc.name)
+				t.Fatal("应被拒绝")
 			}
 			if res.Reason != tc.want {
-				t.Fatalf("%s 的拒绝原因应为 %s，实际 %s", tc.name, tc.want, res.Reason)
+				t.Fatalf("拒绝原因应为 %s，实际 %s", tc.want, res.Reason)
 			}
-			if len(h.Snapshot().Rooms) != 0 {
-				t.Fatal("被拒绝的推流不应创建房间")
-			}
-			if h.HasPublisher(tc.username) {
-				t.Fatal("被拒绝的推流不应写入身份绑定")
+			if res.Message == "" {
+				t.Fatal("拒绝时应带可读提示")
 			}
 		})
 	}
 }
 
-// 规则 1：用户名不能绑定多个不同的推流令牌。
-func TestUsernameCannotBindTwoTokens(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+// 房间名只用于展示：留空时退回用户名，避免 OBS 漏参数就推不上去。
+func TestBindFallsBackToUsernameWhenRoomEmpty(t *testing.T) {
+	h, _ := newTestHub()
+	res := mustBind(t, h, "alex", "", testToken, "s1")
+	if res.Room.Room != "alex" {
+		t.Fatalf("空房间名应退回用户名，实际 %q", res.Room.Room)
+	}
+}
 
-	// 断流进入 GRACE 后仍然占用用户名，不允许换令牌。
-	h.Unpublish("alice", "c1")
-	clock.Advance(time.Minute)
+// 鉴权通过不代表房间存在：必须等真正推流成功才创建房间。
+func TestBindDoesNotCreateRoom(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
 
-	res := h.Publish(PublishInput{Username: "alice", RoomName: "房间", Token: otherTokn, ClientID: "c2"})
+	if _, ok := h.Room("alex"); ok {
+		t.Fatal("鉴权通过后不应创建房间")
+	}
+	if len(h.Rooms()) != 0 {
+		t.Fatalf("房间列表应为空，实际 %d 条", len(h.Rooms()))
+	}
+}
+
+// 规则 1：同一用户名不能绑定两个不同令牌。
+func TestBindRejectsSecondTokenForUsername(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+
+	res := h.Bind(BindInput{Username: "alex", RoomName: "另一个房间", Token: testToken + "x", SessionID: "s2"})
 	if res.Allowed {
-		t.Fatal("用户名已绑定其他令牌，应被拒绝")
+		t.Fatal("同一用户名换令牌应被拒绝")
 	}
 	if res.Reason != ReasonUsernameTokenConflict {
-		t.Fatalf("拒绝原因应为 %s，实际 %s", ReasonUsernameTokenConflict, res.Reason)
+		t.Fatalf("原因应为 %s，实际 %s", ReasonUsernameTokenConflict, res.Reason)
 	}
 }
 
-// 规则 2：同一个推流令牌不能绑定多个不同的用户名。
-func TestTokenCannotBindTwoUsernames(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+// 规则 2：同一令牌不能绑定两个不同用户名。
+func TestBindRejectsSecondUsernameForToken(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
 
-	res := h.Publish(PublishInput{Username: "bob", RoomName: "房间", Token: testToken, ClientID: "c2"})
+	res := h.Bind(BindInput{Username: "bob", RoomName: "测试直播", Token: testToken, SessionID: "s2"})
 	if res.Allowed {
-		t.Fatal("令牌已绑定其他用户名，应被拒绝")
+		t.Fatal("同一令牌换用户名应被拒绝")
 	}
 	if res.Reason != ReasonTokenUsernameConflict {
-		t.Fatalf("拒绝原因应为 %s，实际 %s", ReasonTokenUsernameConflict, res.Reason)
-	}
-	if len(h.Snapshot().Rooms) != 1 {
-		t.Fatalf("不应创建新房间，实际房间数 %d", len(h.Snapshot().Rooms))
+		t.Fatalf("原因应为 %s，实际 %s", ReasonTokenUsernameConflict, res.Reason)
 	}
 }
 
-// 规则 3：相同用户名与相同令牌不能同时建立多个推流连接。
-func TestSameIdentityCannotPublishTwice(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+// 规则 3：同一身份不能同时存在两条推流连接。
+func TestBindRejectsConcurrentPublisher(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "session-a")
+	h.ConfirmLive("alex", &MediaInfo{VideoCodec: "H264"})
 
-	res := h.Publish(PublishInput{Username: "alice", RoomName: "房间", Token: testToken, ClientID: "c2"})
+	res := h.Bind(BindInput{Username: "alex", RoomName: "测试直播", Token: testToken, SessionID: "session-b"})
 	if res.Allowed {
-		t.Fatal("同一身份的第二条推流连接应被拒绝")
+		t.Fatal("直播中同一身份再次推流应被拒绝")
 	}
 	if res.Reason != ReasonAlreadyPublishing {
-		t.Fatalf("拒绝原因应为 %s，实际 %s", ReasonAlreadyPublishing, res.Reason)
+		t.Fatalf("原因应为 %s，实际 %s", ReasonAlreadyPublishing, res.Reason)
 	}
 }
 
-// 同一条连接的重复 on_publish 回调必须幂等，否则 SRS 重试会导致推流被拒。
-func TestRepeatedPublishCallbackIsIdempotent(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+// 同一条连接重复回调（MediaMTX 可能重试）必须幂等放行。
+func TestBindIsIdempotentForSameSession(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "session-a")
+	h.ConfirmLive("alex", nil)
 
-	if n := len(h.Snapshot().Rooms); n != 1 {
-		t.Fatalf("重复回调不应产生额外房间，实际 %d 个", n)
+	res := h.Bind(BindInput{Username: "alex", RoomName: "测试直播", Token: testToken, SessionID: "session-a"})
+	if !res.Allowed {
+		t.Fatalf("同一连接重复鉴权应放行，实际 %s", res.Reason)
 	}
 }
 
-// 并发推流校验必须是原子的：同一身份只有一个赢家。
-func TestConcurrentPublishSameIdentity(t *testing.T) {
-	h, _ := newTestHub(t)
+func TestConfirmLiveCreatesAndRestoresRoom(t *testing.T) {
+	h, clock := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
 
-	const workers = 32
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		allowed  int
-		rejected int
-	)
-	start := make(chan struct{})
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			res := h.Publish(PublishInput{
-				Username: "alice",
-				RoomName: "房间",
-				Token:    testToken,
-				ClientID: fmt.Sprintf("c%d", i),
-			})
-			mu.Lock()
-			if res.Allowed {
-				allowed++
-			} else {
-				rejected++
-			}
-			mu.Unlock()
-		}(i)
+	if changed := h.ConfirmLive("alex", &MediaInfo{VideoCodec: "H264", Width: 1920, Height: 1080}); !changed {
+		t.Fatal("首次确认应报告状态变化")
 	}
-	close(start)
-	wg.Wait()
-
-	if allowed != 1 {
-		t.Fatalf("同一身份的并发推流应恰好 1 个成功，实际 %d 个", allowed)
-	}
-	if rejected != workers-1 {
-		t.Fatalf("其余 %d 个应全部被拒绝，实际被拒 %d 个", workers-1, rejected)
-	}
-}
-
-// 并发推流不同身份时应全部成功。
-func TestConcurrentPublishManyIdentities(t *testing.T) {
-	h, _ := newTestHub(t)
-
-	const workers = 16
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			res := h.Publish(PublishInput{
-				Username: fmt.Sprintf("user%d", i),
-				RoomName: "房间",
-				// 每个身份一个独立令牌（32 位以上，满足格式要求）。
-				Token:    fmt.Sprintf("%032d-abcdefghij", i),
-				ClientID: fmt.Sprintf("c%d", i),
-			})
-			if !res.Allowed {
-				t.Errorf("user%d 应被放行，实际被拒绝: %s", i, res.Reason)
-			}
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	if n := len(h.Snapshot().Rooms); n != workers {
-		t.Fatalf("应有 %d 个房间，实际 %d 个", workers, n)
-	}
-}
-
-// 断流后进入 GRACE，并带上释放时间。
-func TestUnpublishEntersGrace(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	clock.Advance(10 * time.Minute)
-
-	if !h.Unpublish("alice", "c1") {
-		t.Fatal("on_unpublish 应生效")
-	}
-
-	view, ok := h.Room("alice")
+	view, ok := h.Room("alex")
 	if !ok {
-		t.Fatal("GRACE 房间应继续存在")
+		t.Fatal("房间应已创建")
 	}
-	if view.State != StateGrace {
-		t.Fatalf("状态应为 GRACE，实际 %s", view.State)
+	if view.State != StateLive || view.Room != "测试直播" {
+		t.Fatalf("房间状态异常：%+v", view)
 	}
-	if want := clock.Now().Add(5 * time.Minute).UnixMilli(); view.GraceUntil != want {
-		t.Fatalf("释放时间应为 %d，实际 %d", want, view.GraceUntil)
+	if view.Media == nil || view.Media.Width != 1920 {
+		t.Fatalf("应带上编码参数：%+v", view.Media)
 	}
-	if !h.HasPublisher("alice") {
-		t.Fatal("GRACE 期间应保留身份绑定，允许原身份重连")
+
+	// 同一轮直播里巡检反复调用不应刷新开播时间，也不应重复报告变化。
+	if changed := h.ConfirmLive("alex", view.Media); changed {
+		t.Fatal("重复确认不应报告状态变化")
+	}
+	clock.advance(2 * time.Second)
+	h.ConfirmLive("alex", view.Media)
+	if again, _ := h.Room("alex"); again.StartedAt != view.StartedAt {
+		t.Fatalf("开播时间不应被巡检刷新：%d -> %d", view.StartedAt, again.StartedAt)
+	}
+
+	// 断流 → GRACE；重推 → 恢复 LIVE 并清空保留期。
+	if !h.MarkGrace("alex") {
+		t.Fatal("断流应报告状态变化")
+	}
+	grace, _ := h.Room("alex")
+	if grace.State != StateGrace || grace.GraceUntil == 0 {
+		t.Fatalf("应进入 GRACE 并带释放时间：%+v", grace)
+	}
+	if grace.Media != nil {
+		t.Fatal("断流后不应再展示编码参数")
+	}
+
+	clock.advance(time.Minute)
+	h.ConfirmLive("alex", nil)
+	live, _ := h.Room("alex")
+	if live.State != StateLive || live.GraceUntil != 0 {
+		t.Fatalf("重推后应回到 LIVE：%+v", live)
 	}
 }
 
-// 过期回调（旧连接迟到的 on_unpublish）不能把已恢复的推流再次打断。
-func TestUnpublishIgnoresStaleClient(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	h.Unpublish("alice", "c1")
-	mustPublish(t, h, "alice", "房间", testToken, "c2")
+func TestExpireGraceReleasesRoomAndBinding(t *testing.T) {
+	h, clock := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+	h.MarkGrace("alex")
 
-	if h.Unpublish("alice", "c1") {
-		t.Fatal("来自旧连接的 on_unpublish 应被忽略")
-	}
-	view, _ := h.Room("alice")
-	if view.State != StateLive {
-		t.Fatalf("房间应仍为 LIVE，实际 %s", view.State)
-	}
-}
-
-// 规则 4：保留期内原身份可以重新推流并恢复原房间。
-func TestRepublishWithinGraceRestoresRoom(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "旧房间名", testToken, "c1")
-	h.Unpublish("alice", "c1")
-
-	clock.Advance(4 * time.Minute)
-	res := mustPublish(t, h, "alice", "旧房间名", testToken, "c2")
-
-	if res.Room.State != StateLive {
-		t.Fatalf("重推后状态应为 LIVE，实际 %s", res.Room.State)
-	}
-	if res.Room.GraceUntil != 0 {
-		t.Fatalf("重推后应清除释放时间，实际 %d", res.Room.GraceUntil)
-	}
-	if n := len(h.Snapshot().Rooms); n != 1 {
-		t.Fatalf("重推不应产生新房间，实际 %d 个", n)
-	}
-}
-
-// 规则 5：超过保留期后房间与身份绑定被释放，用户名与令牌可被重新占用。
-func TestExpireGraceReleasesIdentity(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	h.Unpublish("alice", "c1")
-
-	// 未到期时不应释放。
-	clock.Advance(4 * time.Minute)
+	clock.advance(4 * time.Minute)
 	if released := h.ExpireGrace(); len(released) != 0 {
-		t.Fatalf("未到期的 GRACE 房间不应被释放，实际释放 %v", released)
+		t.Fatalf("保留期内不应释放，实际释放 %v", released)
 	}
-	if _, ok := h.Room("alice"); !ok {
-		t.Fatal("未到期的房间应继续展示在首页")
-	}
-
-	// 到期后释放。
-	clock.Advance(2 * time.Minute)
-	released := h.ExpireGrace()
-	if len(released) != 1 || released[0] != "alice" {
-		t.Fatalf("应释放 alice，实际 %v", released)
-	}
-	if _, ok := h.Room("alice"); ok {
-		t.Fatal("释放后房间应消失")
-	}
-	if h.HasPublisher("alice") {
-		t.Fatal("释放后应删除身份绑定")
+	if _, ok := h.Room("alex"); !ok {
+		t.Fatal("保留期内房间仍在")
 	}
 
-	// 用户名与令牌都已被释放，可以自由重新绑定。
-	mustPublish(t, h, "alice", "房间", otherTokn, "c9")
-	mustPublish(t, h, "bob", "房间", testToken, "c10")
-}
-
-// 规则 6：房间名称不要求全局唯一。
-func TestRoomNameIsNotUnique(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "同一个名字", testToken, "c1")
-	mustPublish(t, h, "bob", "同一个名字", otherTokn, "c2")
-
-	if n := len(h.Snapshot().Rooms); n != 2 {
-		t.Fatalf("同名房间应共存，实际 %d 个", n)
+	clock.advance(2 * time.Minute)
+	if released := h.ExpireGrace(); len(released) != 1 || released[0] != "alex" {
+		t.Fatalf("超过保留期应释放 alex，实际 %v", released)
+	}
+	if _, ok := h.Room("alex"); ok {
+		t.Fatal("房间应已删除")
+	}
+	// 身份一并释放：原令牌可以重新绑定到新房间。
+	res := h.Bind(BindInput{Username: "alex", RoomName: "新房间", Token: testToken, SessionID: "s9"})
+	if !res.Allowed {
+		t.Fatalf("释放后原身份应可重新使用，实际 %s", res.Reason)
 	}
 }
 
-// 观看人数以 SRS 客户端 ID 去重，重复回调不会重复计数。
-func TestViewerCountingIsIdempotent(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+// 鉴权通过但始终没推流的绑定必须过期，否则用户名会被永久占住。
+func TestExpireBindings(t *testing.T) {
+	h, clock := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
 
-	if !h.Play("alice", "v1") {
-		t.Fatal("首个观看会话应计数")
+	clock.advance(30 * time.Second)
+	if expired := h.ExpireBindings(time.Minute); len(expired) != 0 {
+		t.Fatalf("未超时不应清理，实际 %v", expired)
 	}
-	if h.Play("alice", "v1") {
-		t.Fatal("重复的 on_play 回调不应再次计数")
+	clock.advance(time.Minute)
+	if expired := h.ExpireBindings(time.Minute); len(expired) != 1 {
+		t.Fatalf("超时应清理绑定，实际 %v", expired)
 	}
-	h.Play("alice", "v2")
-
-	view, _ := h.Room("alice")
-	if view.ViewerCount != 2 {
-		t.Fatalf("观看人数应为 2，实际 %d", view.ViewerCount)
-	}
-
-	if !h.Stop("v1") {
-		t.Fatal("on_stop 应移除观看会话")
-	}
-	if h.Stop("v1") {
-		t.Fatal("重复的 on_stop 回调应为无操作")
-	}
-	view, _ = h.Room("alice")
-	if view.ViewerCount != 1 {
-		t.Fatalf("退出后观看人数应为 1，实际 %d", view.ViewerCount)
+	// 已建房间的绑定不受影响。
+	mustBind(t, h, "bob", "测试直播", "bob-token-0123456789abcdef", "s2")
+	h.ConfirmLive("bob", nil)
+	clock.advance(10 * time.Minute)
+	if expired := h.ExpireBindings(time.Minute); len(expired) != 0 {
+		t.Fatalf("已开播的身份不应被清理，实际 %v", expired)
 	}
 }
 
-// 同一个观看客户端切换到另一个房间时，应只计在最新房间上。
-func TestViewerSwitchingRoom(t *testing.T) {
-	h, _ := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	mustPublish(t, h, "bob", "房间", otherTokn, "c2")
+func TestWatchCountsUniqueViewers(t *testing.T) {
+	h, clock := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
 
-	h.Play("alice", "v1")
-	h.Play("bob", "v1")
+	if !h.Watch("alex", "viewer-1") {
+		t.Fatal("房间存在时应记录观看")
+	}
+	h.Watch("alex", "viewer-1") // 心跳重复上报不能重复计数
+	h.Watch("alex", "viewer-2")
+	if view, _ := h.Room("alex"); view.ViewerCount != 2 {
+		t.Fatalf("应统计到 2 人，实际 %d", view.ViewerCount)
+	}
 
-	alice, _ := h.Room("alice")
-	bob, _ := h.Room("bob")
-	if alice.ViewerCount != 0 || bob.ViewerCount != 1 {
-		t.Fatalf("观看人数应为 alice=0 bob=1，实际 %d/%d", alice.ViewerCount, bob.ViewerCount)
+	h.Unwatch("alex", "viewer-2")
+	if view, _ := h.Room("alex"); view.ViewerCount != 1 {
+		t.Fatalf("离开后应剩 1 人，实际 %d", view.ViewerCount)
+	}
+
+	// 关掉浏览器不发离开事件，只能靠心跳超时兜底。
+	clock.advance(40 * time.Second)
+	if removed := h.PruneViewers(30 * time.Second); removed != 1 {
+		t.Fatalf("应清理 1 个僵尸会话，实际 %d", removed)
+	}
+	if view, _ := h.Room("alex"); view.ViewerCount != 0 {
+		t.Fatalf("清理后应为 0 人，实际 %d", view.ViewerCount)
+	}
+
+	if h.Watch("nobody", "viewer-3") {
+		t.Fatal("房间不存在时不应记录观看")
 	}
 }
 
-// 未推流的房间不接受观看会话。
-func TestPlayUnknownRoom(t *testing.T) {
-	h, _ := newTestHub(t)
-	if h.Play("ghost", "v1") {
-		t.Fatal("不存在的房间不应记录观看会话")
+func TestViewHidesToken(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+
+	rooms := h.Rooms()
+	if len(rooms) != 1 {
+		t.Fatalf("应有 1 个房间，实际 %d", len(rooms))
 	}
-	if h.Stop("v1") {
-		t.Fatal("未知客户端的 on_stop 应为无操作")
+	data, err := json.Marshal(rooms[0])
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// 房间过期释放时，其观看会话索引也要一并清理。
-func TestExpireGraceClearsViewers(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	h.Play("alice", "v1")
-	h.Unpublish("alice", "c1")
-
-	clock.Advance(6 * time.Minute)
-	h.ExpireGrace()
-
-	if h.Stop("v1") {
-		t.Fatal("房间释放后观看会话索引应被清理")
+	if strings.Contains(string(data), testToken) {
+		t.Fatalf("房间视图泄露了推流令牌: %s", data)
+	}
+	if strings.Contains(string(data), HashToken(testToken)) {
+		t.Fatalf("房间视图泄露了令牌哈希: %s", data)
 	}
 }
 
-// 僵尸推流连接（回调丢失）应被核对任务打回 GRACE，年轻的会话不受影响。
-func TestReconcileClients(t *testing.T) {
-	h, clock := newTestHub(t)
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
-	h.Play("alice", "v1")
+func TestBindStoresTokenHashOnly(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
 
-	alive := map[string]bool{"c1": false, "v1": false}
-
-	// 会话太年轻：SRS 的客户端列表可能还没刷新，此时不做任何修改。
-	if un, pr := h.ReconcileClients(func(string, string) bool { return true }, 10*time.Second); un != 0 || pr != 0 {
-		t.Fatalf("年轻的会话不应被核对，实际 unpublished=%d pruned=%d", un, pr)
-	}
-
-	clock.Advance(30 * time.Second)
-	un, pr := h.ReconcileClients(func(_, id string) bool { return alive[id] }, 10*time.Second)
-	if un != 1 {
-		t.Fatalf("应判定 1 条推流已断开，实际 %d", un)
-	}
-	if pr != 1 {
-		t.Fatalf("应清掉 1 条僵尸观看会话，实际 %d", pr)
-	}
-	view, _ := h.Room("alice")
-	if view.State != StateGrace {
-		t.Fatalf("状态应为 GRACE，实际 %s", view.State)
-	}
-	if view.ViewerCount != 0 {
-		t.Fatalf("僵尸观看会话应被清理，实际人数 %d", view.ViewerCount)
-	}
-}
-
-// 快照排序：LIVE 在前，同状态按开始时间倒序。
-func TestSnapshotOrdering(t *testing.T) {
-	h, clock := newTestHub(t)
-
-	mustPublish(t, h, "old", "房间", testToken, "c1")
-	clock.Advance(time.Minute)
-	mustPublish(t, h, "new", "房间", otherTokn, "c2")
-	clock.Advance(time.Minute)
-	mustPublish(t, h, "third", "房间", "token-third-0123456789abcdef", "c3")
-	h.Unpublish("third", "c3")
-
-	snap := h.Snapshot()
-	got := make([]string, 0, len(snap.Rooms))
-	for _, r := range snap.Rooms {
-		got = append(got, r.Username+":"+string(r.State))
-	}
-	want := []string{"new:LIVE", "old:LIVE", "third:GRACE"}
-	if len(got) != len(want) {
-		t.Fatalf("房间数量不匹配: %v", got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("排序不匹配:\n got=%v\nwant=%v", got, want)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, pub := range h.byUsername {
+		if pub.tokenHash == testToken {
+			t.Fatal("内存里不应保存令牌明文")
+		}
+		if pub.tokenHash != HashToken(testToken) {
+			t.Fatalf("应保存令牌哈希，实际 %s", pub.tokenHash)
 		}
 	}
+	if _, ok := h.byToken[testToken]; ok {
+		t.Fatal("令牌索引应以哈希为键")
+	}
+	if _, ok := h.byToken[HashToken(testToken)]; !ok {
+		t.Fatal("令牌索引缺少哈希键")
+	}
 }
 
-// 订阅者应当收到变更后的快照，取消订阅后通道关闭。
-func TestSubscribeReceivesSnapshots(t *testing.T) {
-	h, _ := newTestHub(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.Run(ctx)
-
+func TestBroadcastNotifiesSubscribers(t *testing.T) {
+	h, _ := newTestHub()
 	ch, release := h.Subscribe()
 	defer release()
 
-	if h.SubscriberCount() != 1 {
-		t.Fatalf("订阅者数量应为 1，实际 %d", h.SubscriberCount())
-	}
-	mustPublish(t, h, "alice", "房间", testToken, "c1")
+	mustBind(t, h, "alex", "测试直播", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+	h.Broadcast()
 
 	select {
 	case snap := <-ch:
-		if snap.Seq == 0 {
-			t.Fatal("广播的快照应带有递增序号")
+		if len(snap.Rooms) != 1 || snap.Rooms[0].Username != "alex" {
+			t.Fatalf("快照内容异常：%+v", snap)
 		}
-		if len(snap.Rooms) != 1 || snap.Rooms[0].Username != "alice" {
-			t.Fatalf("快照内容不正确: %+v", snap.Rooms)
+		if snap.Seq == 0 || snap.ServerTime == 0 {
+			t.Fatalf("快照应带版本号与时间：%+v", snap)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("等待快照超时")
+	case <-time.After(time.Second):
+		t.Fatal("订阅者应收到快照")
 	}
-
-	release()
-	if h.SubscriberCount() != 0 {
-		t.Fatalf("取消订阅后订阅者数量应为 0，实际 %d", h.SubscriberCount())
-	}
-	if _, ok := <-ch; ok {
-		t.Fatal("取消订阅后通道应被关闭")
+	if h.SubscriberCount() != 1 {
+		t.Fatalf("订阅者数量应为 1，实际 %d", h.SubscriberCount())
 	}
 }
 
-// HashToken 必须稳定且不暴露原文。
-func TestHashToken(t *testing.T) {
-	a := HashToken(testToken)
-	b := HashToken(testToken)
-	if a != b {
-		t.Fatal("同一令牌的摘要应稳定")
-	}
-	if len(a) != 64 {
-		t.Fatalf("SHA-256 十六进制摘要应为 64 字符，实际 %d", len(a))
-	}
-	if a == testToken || HashToken(otherTokn) == a {
-		t.Fatal("不同令牌不应得到相同摘要")
+// 房间按开播时间倒序，最近开播的排在最前面。
+func TestRoomsSortedByStartedAt(t *testing.T) {
+	h, clock := newTestHub()
+	mustBind(t, h, "alex", "旧房间", testToken, "s1")
+	h.ConfirmLive("alex", nil)
+	clock.advance(time.Minute)
+
+	mustBind(t, h, "bob", "新房间", "bob-token-0123456789abcdef", "s2")
+	h.ConfirmLive("bob", nil)
+
+	rooms := h.Rooms()
+	if len(rooms) != 2 || rooms[0].Username != "bob" {
+		t.Fatalf("应按开播时间倒序，实际 %+v", rooms)
 	}
 }

@@ -1,16 +1,18 @@
 /**
  * 生成 OBS 推流码。
  *
- * 房间名可能含中文，这里之所以要 **编码两次**，是被 OBS 的实际行为逼出来的：
- * OBS 在把推流码拼进 RTMP 地址前会先做一次百分号解码（实测 OBS 配置里存的是
- * `room=%E6%B5%8B%E8%AF%95`，SRS 收到的却是 `room=测试`）。而 SRS 一旦在查询串里
- * 看到未编码的非 ASCII 字符，就会解析失败（code=3007 HttpParseUrl），把整段查询串
- * 并进流名变成 `alex?room=测试&token=..`，播放端按干净名字 `alex` 请求永远拿不到画面，
- * 浏览器侧表现为黑屏且没有任何报错。
+ * 房间名可能含中文与 `&`、`=` 这类字符，这里之所以要 **编码两次**，是被 OBS 的
+ * 实际行为逼出来的：OBS 在把推流码拼进 RTMP 地址前会先做一次百分号解码（实测
+ * 配置里存的是 `room=%E6%B5%8B%E8%AF%95`，线上发出的是 `room=测试`）。
  *
- * 编码两次之后：OBS 解一次，线上仍是纯 ASCII 的单次编码（SRS 能正常解析）；
- * ffmpeg / tinysim 这类完全不解码的客户端拿到的是双次编码，后端会多解一层，
- * 两条来源最终都还原成同一个展示名。
+ * 只编码一次的话，解码后查询串里就是裸的 `测试` 甚至裸的 `&`，前者会让日志与
+ * 第三方工具看不懂、后者会直接把查询串劈成两半。编码两次之后：OBS 解一次，
+ * 线上仍是纯 ASCII 的单次编码，MediaMTX 原样把它交给后端，后端 `url.ParseQuery`
+ * 还原成展示名；而完全不解码的客户端（ffmpeg 等）拿到双次编码，后端多解一层，
+ * 两条来源最终都还原成同一个名字。
+ *
+ * MediaMTX 用的是干净的流名（`live/alex`），查询串只出现在它的 auth 回调里，
+ * 因此这里不用担心“查询串被并进流名”这类问题。
  */
 export function buildPublishCode(user: string, roomName: string, token: string): string {
   return user + '?room=' + encodeURIComponent(encodeURIComponent(roomName)) + '&token=' + token

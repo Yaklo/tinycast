@@ -1,0 +1,35 @@
+# MediaMTX 配置（docker compose 使用）
+#
+# 与 deploy/mediamtx/mediamtx.yml 的差别只有两处：
+#   - 回调地址指向容器名 tinycast；
+#   - webrtcAdditionalHosts 额外带上 localhost，方便本机浏览器测试。
+
+logLevel: info
+logDestinations: [stdout]
+
+api: yes
+apiAddress: :9997
+
+rtmp: yes
+rtmpAddress: :1935
+
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsPartDuration: 200ms
+hlsSegmentDuration: 1s
+hlsDirectory: ""
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcAdditionalHosts: [localhost, 127.0.0.1]
+webrtcICEUDPMuxAddress: :8000
+
+srt: no
+rtsp: no
+
+authMethod: http
+authHTTPAddress: http://tinycast:8080/internal/mtx/auth
+
+paths:
+  all_others:

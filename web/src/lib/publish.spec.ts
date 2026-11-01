@@ -17,7 +17,7 @@ describe('buildPublishCode', () => {
     expect(onWire).toBe('%E6%B5%8B%E8%AF%95')
     expect(/^[\x20-\x7e]*$/.test(onWire)).toBe(true)
 
-    // SRS 解析成功，把 param 原样回调；后端 QueryUnescape + decodeRoomValue 还原展示名。
+    // MediaMTX 用干净流名 live/alex，查询串原样交给 auth 回调；后端 url.ParseQuery 还原展示名。
     expect(decodeURIComponent(onWire)).toBe('测试')
   })
 

@@ -1,26 +1,30 @@
 [Unit]
-Description=TinyCast 直播业务后端（Go）
-After=network-online.target
+Description=TinyCast 直播业务后端
+Documentation=https://github.com/ai-yaklo/tinycast
+After=network-online.target mediamtx.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=tinycast
 Group=tinycast
-WorkingDirectory=/opt/tinycast
-# 环境变量集中在 /etc/tinycast/tinycast.env，参考同目录 tinycast.env.example
 EnvironmentFile=-/etc/tinycast/tinycast.env
-ExecStart=/opt/tinycast/tinycast
+ExecStart=/usr/local/bin/tinycast
 Restart=always
-RestartSec=3
-# 后端不需要写文件，做最小化加固
-NoNewPrivileges=true
-PrivateTmp=true
+RestartSec=2
+# 只需要读配置、写日志，其余文件系统一律只读
+NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/log/tinycast
+StateDirectory=tinycast
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target

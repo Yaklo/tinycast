@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -18,458 +16,404 @@ import (
 	"tinycast/internal/hub"
 )
 
-const testSecret = "unit-test-secret"
+const testToken = "MPA49PxJv0mJd4Wq7yTn1sB8Rc2hVfLgXe6uZa9Q"
+const bobToken = "bobToken0123456789abcdefXYZ"
 
-// newFixture 构造一个使用内存状态中心的测试服务。
-//
-// 白名单里包含 192.0.2.0/24 —— httptest 的默认来源地址就落在这个网段。
-func newFixture(t *testing.T, mutate func(*config.Config)) (*Server, *hub.Hub) {
+func mustCIDRs(t *testing.T, raw ...string) []*net.IPNet {
 	t.Helper()
+	out := make([]*net.IPNet, 0, len(raw))
+	for _, item := range raw {
+		_, network, err := net.ParseCIDR(item)
+		if err != nil {
+			t.Fatalf("网段 %s 非法: %v", item, err)
+		}
+		out = append(out, network)
+	}
+	return out
+}
 
+func newTestServer(t *testing.T, tweak func(*config.Config)) (*Server, *hub.Hub) {
+	t.Helper()
 	cfg := &config.Config{
-		HTTPAddr:        ":8080",
+		HTTPAddr:        ":0",
 		RoomGrace:       5 * time.Minute,
-		JanitorInterval: 15 * time.Second,
-		SRS: config.SRSConfig{
-			App:              "live",
-			CallbackSecret:   testSecret,
-			RTMPPublicBase:   "rtmp://live.example.com/live",
-			WebRTCPublicBase: "webrtc://live.example.com/live",
+		ViewerTimeout:   30 * time.Second,
+		PendingTimeout:  60 * time.Second,
+		MonitorInterval: time.Second,
+		MediaMTX: config.MediaMTXConfig{
+			App:             "live",
+			APIURL:          "http://127.0.0.1:9997",
+			WHEPProxyTarget: "http://127.0.0.1:8889",
+			HLSProxyTarget:  "http://127.0.0.1:8888",
+			RTMPPublicBase:  "rtmp://localhost:1935/live",
+			AuthAllowed:     mustCIDRs(t, "127.0.0.0/8", "::1/128"),
 		},
 	}
-	for _, cidr := range []string{"127.0.0.0/8", "192.0.2.0/24"} {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			t.Fatalf("解析测试网段失败: %v", err)
-		}
-		cfg.SRS.CallbackAllowed = append(cfg.SRS.CallbackAllowed, network)
+	if tweak != nil {
+		tweak(cfg)
 	}
-	if mutate != nil {
-		mutate(cfg)
-	}
-
-	h := hub.New(hub.Options{Grace: cfg.RoomGrace})
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(h, cfg, logger), h
+	h := hub.New(cfg.RoomGrace)
+	return New(h, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), h
 }
 
-const (
-	aliceToken = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcd"
-	bobToken   = "ZzYyXxWwVvUuTtSsRrQqPpOoNnMmLlKkJJii9876-"
-)
-
-// callbackBody 对应 SRS 回调请求体中的字段（测试里自己序列化成 snake_case）。
-type callbackBody struct {
-	Action   string
-	ClientID string
-	App      string
-	Stream   string
-	Param    string
-}
-
-func (b callbackBody) marshal() ([]byte, error) {
-	return json.Marshal(map[string]string{
-		"action":    b.Action,
-		"client_id": b.ClientID,
-		"app":       b.App,
-		"stream":    b.Stream,
-		"param":     b.Param,
-	})
-}
-
-// postCallback 发起一次 SRS 回调，返回响应。
-func postCallback(t *testing.T, srv *Server, secret string, body callbackBody) *httptest.ResponseRecorder {
+// do 发一个请求并把响应解析成 map，方便断言 JSON 字段。
+func do(t *testing.T, srv *Server, method, target string, body string) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
-
-	raw, err := body.marshal()
-	if err != nil {
-		t.Fatalf("序列化回调体失败: %v", err)
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
 	}
-	target := "/internal/srs/" + body.Action
-	if secret != "" {
-		target += "?secret=" + url.QueryEscape(secret)
-	}
-	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(string(raw)))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(method, target, reader)
+	req.RemoteAddr = "127.0.0.1:50000"
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
+
+	out := map[string]any{}
+	if rec.Body.Len() > 0 && strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("响应不是合法 JSON: %s", rec.Body.String())
+		}
+	}
+	return rec, out
+}
+
+func authBody(action, path, query, id string) string {
+	payload := map[string]any{
+		"ip":       "127.0.0.1",
+		"action":   action,
+		"path":     path,
+		"protocol": "rtmp",
+		"id":       id,
+		"query":    query,
+	}
+	data, _ := json.Marshal(payload)
+	return string(data)
+}
+
+func publish(t *testing.T, srv *Server, username, room, token, session string) *httptest.ResponseRecorder {
+	t.Helper()
+	query := "room=" + room + "&token=" + token
+	if room == "" {
+		query = "token=" + token
+	}
+	rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("publish", "live/"+username, query, session))
 	return rec
 }
 
-func publishBody(username, room, token, clientID string) callbackBody {
-	param := url.Values{}
-	param.Set("room", room)
-	param.Set("token", token)
-	return callbackBody{
-		Action:   actionPublish,
-		ClientID: clientID,
-		App:      "live",
-		Stream:   username,
-		Param:    "?" + param.Encode(),
+func TestConfigEndpoint(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	rec, body := do(t, srv, http.MethodGet, "/api/config", "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码应为 200，实际 %d", rec.Code)
+	}
+	if body["app"] != "live" || body["rtmpServer"] != "rtmp://localhost:1935/live" {
+		t.Fatalf("配置内容异常：%v", body)
+	}
+	if body["graceSeconds"].(float64) != 300 {
+		t.Fatalf("保留时长应为 300 秒，实际 %v", body["graceSeconds"])
+	}
+	if body["hls"] != true || body["webrtc"] != true {
+		t.Fatalf("两种播放方式都应可用：%v", body)
 	}
 }
 
-// 一次合法推流回调应放行并创建房间。
-func TestSRSPublishAllowed(t *testing.T) {
-	srv, h := newFixture(t, nil)
+func TestRoomsEmptyIsArray(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	rec, _ := do(t, srv, http.MethodGet, "/api/rooms", "")
 
-	rec := postCallback(t, srv, testSecret, publishBody("alice", "爱丽丝的直播间", aliceToken, "c1"))
-	if rec.Code != http.StatusOK || rec.Body.String() != "0" {
-		t.Fatalf("应放行（200/0），实际 %d/%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码应为 200，实际 %d", rec.Code)
 	}
-	view, ok := h.Room("alice")
-	if !ok || view.State != hub.StateLive {
-		t.Fatalf("应创建 LIVE 房间，实际 %+v ok=%v", view, ok)
-	}
-	if view.Room != "爱丽丝的直播间" {
-		t.Fatalf("房间名解析错误: %q", view.Room)
+	if !strings.Contains(rec.Body.String(), `"rooms":[]`) {
+		t.Fatalf("空列表应序列化为 []，实际 %s", rec.Body.String())
 	}
 }
 
-// 令牌非法时应拒绝，且 SRS 能看到的响应体不能是 0。
-func TestSRSPublishRejectedOnInvalidToken(t *testing.T) {
-	srv, h := newFixture(t, nil)
+func TestRoomNotFound(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
 
-	rec := postCallback(t, srv, testSecret, publishBody("alice", "房间", "tooshort", "c1"))
-	if rec.Code == http.StatusOK || rec.Body.String() == "0" {
-		t.Fatalf("应拒绝，实际 %d/%q", rec.Code, rec.Body.String())
+	rec, body := do(t, srv, http.MethodGet, "/api/rooms/nobody", "")
+	if rec.Code != http.StatusNotFound || body["code"] != "room_not_found" {
+		t.Fatalf("应返回 404 room_not_found，实际 %d %v", rec.Code, body)
 	}
-	if got := rec.Header().Get("X-Tinycast-Reason"); got != string(hub.ReasonInvalidToken) {
-		t.Fatalf("拒绝原因头应为 %s，实际 %q", hub.ReasonInvalidToken, got)
-	}
-	if len(h.Snapshot().Rooms) != 0 {
-		t.Fatal("被拒绝的推流不应创建房间")
+
+	rec, body = do(t, srv, http.MethodGet, "/api/does-not-exist", "")
+	if rec.Code != http.StatusNotFound || body["code"] != "not_found" {
+		t.Fatalf("未知接口应返回 JSON 404，实际 %d %v", rec.Code, body)
 	}
 }
 
-// 同一身份的第二条推流连接必须被拒绝。
-func TestSRSPublishRejectsSecondConnection(t *testing.T) {
-	srv, _ := newFixture(t, nil)
+// 完整的一条链路：鉴权通过 → 监控确认开播 → 房间可查 → 播放信息可用。
+func TestPublishFlowCreatesRoom(t *testing.T) {
+	srv, h := newTestServer(t, nil)
 
-	if rec := postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1")); rec.Body.String() != "0" {
-		t.Fatalf("首次推流应放行，实际 %d/%q", rec.Code, rec.Body.String())
+	rec := publish(t, srv, "alex", "%E6%B5%8B%E8%AF%95%E7%9B%B4%E6%92%AD", testToken, "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("鉴权应通过，实际 %d %s", rec.Code, rec.Body.String())
 	}
-	rec := postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c2"))
-	if rec.Body.String() == "0" {
-		t.Fatal("第二条连接应被拒绝")
+
+	// 鉴权通过但还没开播：房间不存在。
+	if rec, _ := do(t, srv, http.MethodGet, "/api/rooms/alex", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("未开播时不应有房间，实际 %d", rec.Code)
 	}
-	if got := rec.Header().Get("X-Tinycast-Reason"); got != string(hub.ReasonAlreadyPublishing) {
-		t.Fatalf("拒绝原因应为 %s，实际 %q", hub.ReasonAlreadyPublishing, got)
+
+	h.ConfirmLive("alex", &hub.MediaInfo{VideoCodec: "H264", Width: 1920, Height: 1080})
+
+	rec, body := do(t, srv, http.MethodGet, "/api/rooms/alex", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("房间应可查，实际 %d", rec.Code)
+	}
+	room := body["room"].(map[string]any)
+	if room["room"] != "测试直播" || room["state"] != "LIVE" {
+		t.Fatalf("房间信息异常：%v", room)
+	}
+	if room["media"].(map[string]any)["width"].(float64) != 1920 {
+		t.Fatalf("应带编码参数：%v", room["media"])
+	}
+
+	_, body = do(t, srv, http.MethodGet, "/api/rooms/alex/play", "")
+	play := body["playback"].(map[string]any)
+	if play["protocol"] != "hls" {
+		t.Fatalf("默认应推荐 HLS，实际 %v", play["protocol"])
+	}
+	if play["hlsUrl"] != "/hls/live/alex/index.m3u8" {
+		t.Fatalf("HLS 地址异常：%v", play["hlsUrl"])
+	}
+	if play["whepUrl"] != "/rtc/live/alex/whep" {
+		t.Fatalf("WHEP 地址异常：%v", play["whepUrl"])
 	}
 }
 
-// 回调密钥缺失或错误时一律拒绝。
-func TestSRSCallbackRequiresSecret(t *testing.T) {
-	srv, _ := newFixture(t, nil)
+// 只有 WebRTC 代理时推荐 webRTC，并通过 /api/config 反映出来。
+func TestPlayWithoutHLS(t *testing.T) {
+	srv, h := newTestServer(t, func(c *config.Config) { c.MediaMTX.HLSProxyTarget = "" })
+	h.ConfirmLive("alex", nil)
 
-	for _, secret := range []string{"", "wrong-secret"} {
-		rec := postCallback(t, srv, secret, publishBody("alice", "房间", aliceToken, "c1"))
-		if rec.Code != http.StatusForbidden || rec.Body.String() == "0" {
-			t.Fatalf("secret=%q 应被拒绝，实际 %d/%q", secret, rec.Code, rec.Body.String())
+	_, body := do(t, srv, http.MethodGet, "/api/config", "")
+	if body["hls"] != false || body["webrtc"] != true {
+		t.Fatalf("配置应与代理开关一致：%v", body)
+	}
+
+	_, body = do(t, srv, http.MethodGet, "/api/rooms/alex/play", "")
+	play := body["playback"].(map[string]any)
+	if play["protocol"] != "webrtc" {
+		t.Fatalf("应推荐 webrtc，实际 %v", play["protocol"])
+	}
+	if _, ok := play["hlsUrl"]; ok {
+		t.Fatalf("未配置 HLS 时不应给出 hlsUrl：%v", play)
+	}
+}
+
+// 断流保留期不能给播放地址，否则前端会播一个不存在的流。
+func TestPlayInGraceHasNoPlayback(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	h.ConfirmLive("alex", nil)
+	h.MarkGrace("alex")
+
+	_, body := do(t, srv, http.MethodGet, "/api/rooms/alex/play", "")
+	if body["state"] != "GRACE" {
+		t.Fatalf("状态应为 GRACE，实际 %v", body["state"])
+	}
+	if _, ok := body["playback"]; ok {
+		t.Fatalf("保留期不应给播放地址：%v", body)
+	}
+	if body["graceUntil"].(float64) <= float64(time.Now().UnixMilli()) {
+		t.Fatalf("应给出释放时间：%v", body["graceUntil"])
+	}
+}
+
+func TestPublishRejectsInvalidToken(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	rec := publish(t, srv, "alex", "测试", "short", "s1")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("非法令牌应返回 401，实际 %d", rec.Code)
+	}
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Code != string(hub.ReasonInvalidToken) || body.Message == "" {
+		t.Fatalf("拒绝原因异常：%+v", body)
+	}
+}
+
+func TestPublishRejectsUnboundAndConflicts(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	if rec := publish(t, srv, "alex", "测试", testToken, "s1"); rec.Code != http.StatusOK {
+		t.Fatalf("首次鉴权应通过，实际 %d", rec.Code)
+	}
+	// 规则 1：同一用户名换令牌。
+	if rec := publish(t, srv, "alex", "测试", "anotherToken0123456789abcdef", "s2"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("换令牌应被拒绝，实际 %d", rec.Code)
+	}
+	// 规则 2：同一令牌换用户名。
+	if rec := publish(t, srv, "bob", "测试", testToken, "s3"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("换用户名应被拒绝，实际 %d", rec.Code)
+	}
+}
+
+// 推流路径必须在配置的 app 下，避免有人推到其它路径绕过统计。
+func TestPublishRejectsOtherApp(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	rec, body := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("publish", "other/alex", "token="+testToken, "s1"))
+
+	if rec.Code != http.StatusForbidden || body["code"] != "invalid_path" {
+		t.Fatalf("应返回 403 invalid_path，实际 %d %v", rec.Code, body)
+	}
+}
+
+func TestPublishAcceptsTokenFromPasswordAndQuery(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	// 令牌填在密码位（rtmp://user:token@host）。
+	body := `{"action":"publish","path":"live/alex","password":"` + testToken + `","query":"","id":"s1"}`
+	if rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", body); rec.Code != http.StatusOK {
+		t.Fatalf("密码位令牌应被接受，实际 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 换一个用户名，只用 query 里的令牌。
+	body = `{"action":"publish","path":"live/bob","query":"room=%E6%B5%8B%E8%AF%95&token=` + bobToken + `","id":"s2"}`
+	if rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", body); rec.Code != http.StatusOK {
+		t.Fatalf("query 令牌应被接受，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthAllowsReadAndAPI(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+
+	for _, action := range []string{"read", "api", "metrics", ""} {
+		rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody(action, "live/alex", "", "s1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("action=%q 应放行，实际 %d", action, rec.Code)
 		}
 	}
 }
 
-// 来自非白名单地址的回调一律拒绝，即使密钥正确。
-func TestSRSCallbackRejectsForeignIP(t *testing.T) {
-	srv, _ := newFixture(t, func(cfg *config.Config) {
-		_, network, _ := net.ParseCIDR("10.0.0.0/8")
-		cfg.SRS.CallbackAllowed = []*net.IPNet{network}
-	})
+func TestAuthSecret(t *testing.T) {
+	srv, _ := newTestServer(t, func(c *config.Config) { c.MediaMTX.AuthSecret = "s3cret" })
 
-	rec := postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
-	if rec.Code != http.StatusForbidden || rec.Body.String() == "0" {
-		t.Fatalf("外部地址的回调应被拒绝，实际 %d/%q", rec.Code, rec.Body.String())
+	rec, body := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("read", "live/alex", "", "s1"))
+	if rec.Code != http.StatusUnauthorized || body["code"] != "invalid_secret" {
+		t.Fatalf("缺密钥应拒绝，实际 %d %v", rec.Code, body)
+	}
+
+	// 查询参数里带密钥。
+	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth?secret=s3cret", strings.NewReader(authBody("read", "live/alex", "", "s1")))
+	req.RemoteAddr = "127.0.0.1:50000"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("密钥正确时应放行，实际 %d %s", rr.Code, rr.Body.String())
+	}
+
+	// 也可以放在请求头里。
+	req = httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("read", "live/alex", "", "s1")))
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("X-Tinycast-Secret", "s3cret")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("请求头密钥应放行，实际 %d", rr.Code)
 	}
 }
 
-// 未配置密钥但显式允许任意来源时（本地调试）回调应放行。
-func TestSRSCallbackAllowAll(t *testing.T) {
-	srv, h := newFixture(t, func(cfg *config.Config) {
-		cfg.SRS.CallbackSecret = ""
-		cfg.SRS.CallbackAllowAll = true
-	})
+func TestAuthRejectsPublicSource(t *testing.T) {
+	srv, _ := newTestServer(t, func(c *config.Config) { c.MediaMTX.AuthAllowed = mustCIDRs(t, "10.0.0.0/8") })
 
-	rec := postCallback(t, srv, "", publishBody("alice", "房间", aliceToken, "c1"))
-	if rec.Code != http.StatusOK || rec.Body.String() != "0" {
-		t.Fatalf("应放行，实际 %d/%q", rec.Code, rec.Body.String())
-	}
-	if _, ok := h.Room("alice"); !ok {
-		t.Fatal("应创建房间")
+	rec, body := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("publish", "live/alex", "token="+testToken, "s1"))
+	if rec.Code != http.StatusForbidden || body["code"] != "ip_forbidden" {
+		t.Fatalf("公网来源应拒绝，实际 %d %v", rec.Code, body)
 	}
 }
 
-// on_unpublish 让房间进入 GRACE，重推后恢复 LIVE。
-func TestSRSUnpublishAndRepublish(t *testing.T) {
-	srv, h := newFixture(t, nil)
+func TestWatchHeartbeat(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	h.ConfirmLive("alex", nil)
 
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
-
-	rec := postCallback(t, srv, testSecret, callbackBody{
-		Action: actionUnpublish, ClientID: "c1", App: "live", Stream: "alice",
-	})
-	if rec.Code != http.StatusOK || rec.Body.String() != "0" {
-		t.Fatalf("on_unpublish 应放行，实际 %d/%q", rec.Code, rec.Body.String())
-	}
-	view, _ := h.Room("alice")
-	if view.State != hub.StateGrace {
-		t.Fatalf("应进入 GRACE，实际 %s", view.State)
-	}
-	if view.GraceUntil == 0 {
-		t.Fatal("GRACE 应带释放时间")
-	}
-
-	// 恢复推流。
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c2"))
-	view, _ = h.Room("alice")
-	if view.State != hub.StateLive {
-		t.Fatalf("重推后应为 LIVE，实际 %s", view.State)
-	}
-}
-
-// 观看回调驱动在线人数，重复回调不重复计数。
-func TestSRSViewerCounting(t *testing.T) {
-	srv, h := newFixture(t, nil)
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
-
-	for _, id := range []string{"v1", "v1", "v2"} {
-		postCallback(t, srv, testSecret, callbackBody{
-			Action: actionPlay, ClientID: id, App: "live", Stream: "alice",
-		})
-	}
-	view, _ := h.Room("alice")
-	if view.ViewerCount != 2 {
-		t.Fatalf("观看人数应为 2，实际 %d", view.ViewerCount)
-	}
-
-	postCallback(t, srv, testSecret, callbackBody{Action: actionStop, ClientID: "v1", App: "live", Stream: "alice"})
-	postCallback(t, srv, testSecret, callbackBody{Action: actionStop, ClientID: "v1", App: "live", Stream: "alice"})
-	view, _ = h.Room("alice")
-	if view.ViewerCount != 1 {
-		t.Fatalf("退出后观看人数应为 1，实际 %d", view.ViewerCount)
-	}
-}
-
-// 其他 app 的回调应被放行但不影响本服务的状态。
-func TestSRSCallbackIgnoresOtherApp(t *testing.T) {
-	srv, h := newFixture(t, nil)
-
-	body := publishBody("alice", "房间", aliceToken, "c1")
-	body.App = "other"
-	rec := postCallback(t, srv, testSecret, body)
-	if rec.Code != http.StatusOK || rec.Body.String() != "0" {
-		t.Fatalf("外部 app 的回调应直接放行，实际 %d/%q", rec.Code, rec.Body.String())
-	}
-	if len(h.Snapshot().Rooms) != 0 {
-		t.Fatal("外部 app 不应创建房间")
-	}
-}
-
-// on_publish 请求体无法解析时必须拒绝（不能"解析失败就放行"）。
-func TestSRSPublishBadPayloadRejected(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-
-	req := httptest.NewRequest(http.MethodPost, "/internal/srs/on_publish?secret="+url.QueryEscape(testSecret), strings.NewReader("{not json"))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusOK || rec.Body.String() == "0" {
-		t.Fatalf("非法请求体应被拒绝，实际 %d/%q", rec.Code, rec.Body.String())
-	}
-}
-
-// 未知回调类型返回 404，避免被当成有效回调。
-func TestSRSUnknownAction(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	rec := postCallback(t, srv, testSecret, callbackBody{Action: "on_something", ClientID: "c1"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未知回调应返回 404，实际 %d", rec.Code)
-	}
-}
-
-// 房间列表接口只暴露展示字段，绝不包含推流令牌或其摘要。
-func TestRoomsEndpointHidesToken(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
-
-	req := httptest.NewRequest(http.MethodGet, "/api/rooms", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
+	rec, body := do(t, srv, http.MethodPost, "/api/rooms/alex/watch", `{"viewerId":"viewer-1"}`)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("房间列表应返回 200，实际 %d", rec.Code)
+		t.Fatalf("心跳应成功，实际 %d %s", rec.Code, rec.Body.String())
 	}
-	raw := rec.Body.String()
-	if strings.Contains(raw, aliceToken) {
-		t.Fatal("房间列表不得包含推流令牌明文")
-	}
-	if strings.Contains(raw, hub.HashToken(aliceToken)) {
-		t.Fatal("房间列表不得包含推流令牌摘要")
+	if body["room"].(map[string]any)["viewerCount"].(float64) != 1 {
+		t.Fatalf("应统计到 1 人：%v", body["room"])
 	}
 
-	var payload struct {
-		Rooms []hub.RoomView
+	// 重复心跳不能重复计数。
+	do(t, srv, http.MethodPost, "/api/rooms/alex/watch", `{"viewerId":"viewer-1"}`)
+	if _, body = do(t, srv, http.MethodGet, "/api/rooms/alex", ""); body["room"].(map[string]any)["viewerCount"].(float64) != 1 {
+		t.Fatalf("重复心跳不应重复计数：%v", body["room"])
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("解析房间列表失败: %v", err)
+
+	// 查询参数形式同样可用。
+	if rec, _ := do(t, srv, http.MethodPost, "/api/rooms/alex/watch?viewerId=viewer-2", ""); rec.Code != http.StatusOK {
+		t.Fatalf("查询参数形式心跳应成功，实际 %d", rec.Code)
 	}
-	if len(payload.Rooms) != 1 || payload.Rooms[0].Username != "alice" {
-		t.Fatalf("房间列表内容不正确: %+v", payload.Rooms)
+
+	// 离开后立即减一。
+	if rec, _ := do(t, srv, http.MethodDelete, "/api/rooms/alex/watch?viewerId=viewer-2", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("离开应返回 204，实际 %d", rec.Code)
+	}
+	if _, body = do(t, srv, http.MethodGet, "/api/rooms/alex", ""); body["room"].(map[string]any)["viewerCount"].(float64) != 1 {
+		t.Fatalf("离开后应剩 1 人：%v", body["room"])
 	}
 }
 
-// 房间详情：不存在时返回 404。
-func TestRoomDetailNotFound(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/rooms/ghost", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("不存在的房间应返回 404，实际 %d", rec.Code)
+func TestWatchValidatesViewerID(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	h.ConfirmLive("alex", nil)
+
+	for _, body := range []string{"", `{}`, `{"viewerId":"bad id!"}`, `{"viewerId":"` + strings.Repeat("a", 65) + `"}`} {
+		rec, out := do(t, srv, http.MethodPost, "/api/rooms/alex/watch", body)
+		if rec.Code != http.StatusBadRequest || out["code"] != "invalid_viewer" {
+			t.Fatalf("请求体 %q 应返回 400 invalid_viewer，实际 %d %v", body, rec.Code, out)
+		}
+	}
+
+	// 房间不存在时心跳返回 404，前端据此停止重试。
+	if rec, _ := do(t, srv, http.MethodPost, "/api/rooms/nobody/watch", `{"viewerId":"v1"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("房间不存在应返回 404，实际 %d", rec.Code)
 	}
 }
 
-// 播放信息：LIVE 时给出 WHEP 地址，GRACE 时不给播放地址。
-func TestPlayInfo(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
+func TestSSESendsInitialSnapshot(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	h.ConfirmLive("alex", nil)
 
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/rooms/alice/play", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("播放信息应返回 200，实际 %d", rec.Code)
-	}
-	var live playResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &live); err != nil {
-		t.Fatalf("解析播放信息失败: %v", err)
-	}
-	if live.Playback == nil {
-		t.Fatal("LIVE 状态应返回播放信息")
-	}
-	if !strings.Contains(live.Playback.WhepURL, "/rtc/v1/whep/") {
-		t.Fatalf("WHEP 地址不正确: %q", live.Playback.WhepURL)
-	}
-	if !strings.Contains(live.Playback.WhepURL, "stream=alice") || !strings.Contains(live.Playback.WhepURL, "app=live") {
-		t.Fatalf("WHEP 地址应带上 app 与 stream 参数: %q", live.Playback.WhepURL)
-	}
-
-	postCallback(t, srv, testSecret, callbackBody{Action: actionUnpublish, ClientID: "c1", App: "live", Stream: "alice"})
-
-	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/rooms/alice/play", nil))
-	var grace playResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &grace); err != nil {
-		t.Fatalf("解析播放信息失败: %v", err)
-	}
-	if grace.Playback != nil {
-		t.Fatal("GRACE 状态不应返回播放地址")
-	}
-	if grace.GraceUntil == 0 {
-		t.Fatal("GRACE 状态应返回剩余保留时间点")
-	}
-}
-
-// 未被 SRS 使用的 /internal 路径返回 JSON 404，不会被 SPA 回退吃掉。
-func TestInternalNotFoundIsJSON(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/internal/nope", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("应返回 404，实际 %d", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("应返回 JSON，实际 %q", ct)
-	}
-}
-
-// SSE 连接应先收到一帧完整快照。
-func TestSSEInitialSnapshot(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	postCallback(t, srv, testSecret, publishBody("alice", "房间", aliceToken, "c1"))
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events", nil)
-	if err != nil {
-		t.Fatalf("构造请求失败: %v", err)
-	}
-	resp, err := ts.Client().Do(req)
-	if err != nil {
-		t.Fatalf("建立 SSE 连接失败: %v", err)
-	}
-	defer resp.Body.Close()
+	req = req.WithContext(ctx)
 
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Fatalf("Content-Type 应为 text/event-stream，实际 %q", ct)
-	}
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.Handler().ServeHTTP(rec, req)
+		close(done)
+	}()
 
-	reader := bufio.NewReader(resp.Body)
-	var dataLine string
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && dataLine == "" {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("读取 SSE 失败: %v", err)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rec.Body.String(), "event: rooms") {
+			break
 		}
-		if strings.HasPrefix(line, "data: ") {
-			dataLine = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if dataLine == "" {
-		t.Fatal("未收到快照数据")
-	}
+	cancel()
+	<-done
 
-	var snap hub.Snapshot
-	if err := json.Unmarshal([]byte(dataLine), &snap); err != nil {
-		t.Fatalf("解析快照失败: %v", err)
+	out := rec.Body.String()
+	if !strings.Contains(out, "retry: 3000") {
+		t.Fatalf("应设置重连间隔：%s", out)
 	}
-	if len(snap.Rooms) != 1 || snap.Rooms[0].Username != "alice" {
-		t.Fatalf("首帧快照内容不正确: %+v", snap.Rooms)
+	if !strings.Contains(out, "event: rooms") || !strings.Contains(out, `"username":"alex"`) {
+		t.Fatalf("应推送房间快照：%s", out)
 	}
-}
-
-// 前端未构建时，根路径应返回可读提示而不是 404。
-func TestIndexPageServed(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("首页应返回 200，实际 %d", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Fatalf("首页应返回 HTML，实际 %q", ct)
-	}
-}
-
-// 公开配置接口不得泄露回调密钥等敏感信息。
-func TestConfigEndpointSanitized(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("配置接口应返回 200，实际 %d", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), testSecret) {
-		t.Fatal("公开配置不得包含回调密钥")
-	}
-}
-
-// 健康检查返回基本统计。
-func TestHealthz(t *testing.T) {
-	srv, _ := newFixture(t, nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("健康检查应返回 200，实际 %d", rec.Code)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("解析健康检查响应失败: %v", err)
-	}
-	if payload["status"] != "ok" {
-		t.Fatalf("健康检查状态不正确: %v", payload["status"])
+	if rec.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("Content-Type 异常：%s", rec.Header().Get("Content-Type"))
 	}
 }

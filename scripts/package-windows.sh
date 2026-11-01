@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 一键产出 Windows 生产运行包：构建 tinycast.exe、准备 SRS 6（含 Cygwin 运行库）、打成 zip。
+# 一键产出 Windows 运行包：构建 tinycast.exe、准备 MediaMTX（Windows 版）、打成 zip。
 #
-# 用法：./scripts/package-windows.sh            # 需要联网下载 SRS（首次约 16MB）
+# 用法：./scripts/package-windows.sh            # 首次会联网下载 MediaMTX（约 30MB）
 #       SKIP_WEB=1 ./scripts/package-windows.sh # 前端产物已存在时跳过前端构建
 # 产物：bin/tinycast-windows-amd64.zip（解压即用，目录结构见 deploy/windows/部署说明.txt）
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # 仓库内自带工具链时优先使用（$HOME 不可写的环境）
@@ -18,15 +18,15 @@ fi
 OUTDIR="bin/windows-amd64"
 ZIP="bin/tinycast-windows-amd64.zip"
 
-if [[ ! -f "$OUTDIR/srs/objs/srs.exe" ]]; then
-  echo "==> 首次构建，先获取 SRS 6 与 Cygwin 运行库"
-  ./scripts/fetch-srs-windows.sh
+if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
+  echo "==> 首次构建，先获取 MediaMTX 的 Windows 版本"
+  ./scripts/fetch-mediamtx-windows.sh
 fi
 
 ./scripts/build.sh --windows
 
 # 运行时日志不进压缩包（启动脚本会自己创建 logs 目录）
-rm -rf "$OUTDIR/logs" "$OUTDIR/srs/logs"
+rm -rf "$OUTDIR/logs"
 
 echo "==> 打包 $ZIP"
 python3 - "$OUTDIR" "$ZIP" <<'PY'
@@ -38,8 +38,8 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for base, dirs, files in os.walk(src):
         dirs.sort()
         for name in sorted(files):
-            # SRS 运行期残留的 pid/id 文件与日志一样不进包
-            if name.endswith((".pid", ".id")):
+            # 运行期残留的 pid 文件与日志一样不进包
+            if name.endswith((".pid", ".id", ".log")):
                 continue
             full = os.path.join(base, name)
             z.write(full, os.path.relpath(full, src))

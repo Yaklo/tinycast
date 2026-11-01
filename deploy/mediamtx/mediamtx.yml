@@ -1,0 +1,48 @@
+# MediaMTX 配置（宿主机 / Windows 部署）
+#
+# MediaMTX 只负责收发媒体流；谁能推流、房间什么时候结束、多少人观看，
+# 全部由 tinycast 后端决定。因此这里最关键的三件事是：
+#   1. authMethod: http —— 每个 publish / read 请求都回调后端；
+#   2. api 只监听 127.0.0.1 —— 后端要靠它读路径与编码，公网不该看到它；
+#   3. hlsDirectory: "" —— HLS 分片放内存，不落盘。
+
+logLevel: info
+logDestinations: [stdout]
+
+# 供 tinycast 读取路径状态（/v3/paths/list）。默认端口 9997，只给本机。
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# OBS 推流入口
+rtmp: yes
+rtmpAddress: :1935
+rtmpEncryption: "no"
+
+# 浏览器播放（经 tinycast 的 /hls/ 反向代理转发，无需单独暴露）
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsPartDuration: 200ms
+hlsSegmentDuration: 1s
+hlsDirectory: ""
+hlsAlwaysRemux: no
+
+# 浏览器播放（经 tinycast 的 /rtc/ 反向代理转发，无需单独暴露）
+webrtc: yes
+webrtcAddress: :8889
+# 观众能访问到的地址。本机测试保持 127.0.0.1；
+# 局域网/公网部署请改成服务器的实际 IP 或域名，例如 [live.example.com]
+webrtcAdditionalHosts: [127.0.0.1]
+# WebRTC 媒体走 UDP 8000，防火墙必须放通
+webrtcICEUDPMuxAddress: :8000
+
+srt: no
+rtsp: no
+
+# 所有推流/播放请求先问后端；后端按用户名 + 令牌判断能否推流
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8080/internal/mtx/auth
+
+# 任何路径都走 all_others，不预创建房间
+paths:
+  all_others:

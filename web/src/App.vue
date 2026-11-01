@@ -15,7 +15,7 @@ onMounted(() => {
       <RouterView />
     </main>
     <footer class="foot">
-      <span>TinyCast · SRS + Go + Vue</span>
+      <span>TinyCast · MediaMTX + Go + Vue</span>
       <span class="foot-sep">·</span>
       <span>无需注册，推流即开房</span>
     </footer>

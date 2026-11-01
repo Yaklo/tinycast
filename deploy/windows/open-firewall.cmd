@@ -3,13 +3,13 @@ REM ==========================================================================
 REM  TinyCast firewall rules
 REM
 REM  Run this file as Administrator (right-click -> "Run as administrator").
-REM  It opens the ports SRS needs on this machine:
+REM  It opens the ports TinyCast needs on this machine:
 REM    TCP 1935  OBS publishes RTMP here
-REM    TCP 8080  TinyCast web UI, API and the /rtc/ signalling proxy
-REM    TCP 1985  SRS HTTP API (internal diagnostics only)
-REM    UDP 8000  WebRTC media - REQUIRED, without it the player connects
-REM              but never receives a single video frame (black screen)
+REM    TCP 8080  Web UI, API, and the /hls/ + /rtc/ proxies
+REM    UDP 8000  WebRTC media - REQUIRED for the low-latency mode
+REM              (HLS playback works without it)
 REM
+REM  MediaMTX API (TCP 9997) stays on 127.0.0.1 and is never exposed.
 REM  The rules are named "TinyCast ..." so you can delete them later from
 REM  wf.msc (Windows Defender Firewall with Advanced Security).
 REM ==========================================================================
@@ -26,7 +26,6 @@ if errorlevel 1 (
 
 call :allow "TinyCast TCP 1935" TCP 1935
 call :allow "TinyCast TCP 8080" TCP 8080
-call :allow "TinyCast TCP 1985" TCP 1985
 call :allow "TinyCast UDP 8000" UDP 8000
 
 echo.

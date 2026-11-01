@@ -2,6 +2,7 @@
 import StatusBadge from './StatusBadge.vue'
 import { useCountdown } from '../composables/useCountdown'
 import { formatAgo } from '../lib/format'
+import { codecLabel } from '../lib/playback'
 import type { RoomView } from '../types'
 
 const props = defineProps<{ room: RoomView }>()
@@ -30,8 +31,11 @@ const { label: graceLabel, expired: graceExpired } = useCountdown(() => props.ro
     <h3 class="room-name">{{ room.room }}</h3>
     <p class="room-user">@{{ room.username }}</p>
 
-    <p v-if="room.warning === 'stream_unparsed'" class="card-warn">
-      推流码异常，观众端会黑屏
+    <p v-if="room.media?.videoCodec" class="card-codec">
+      <span class="codec">{{ codecLabel(room.media.videoCodec) }}</span>
+      <span v-if="room.media.width && room.media.height" class="resolution">
+        {{ room.media.width }}×{{ room.media.height }}
+      </span>
     </p>
 
     <div class="card-foot">
@@ -117,10 +121,21 @@ const { label: graceLabel, expired: graceExpired } = useCountdown(() => props.ro
   overflow-wrap: anywhere;
 }
 
-.card-warn {
+.card-codec {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11.5px;
-  color: #fcd34d;
+  color: var(--text-faint);
+}
+
+.codec {
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--mono);
 }
 
 .card-foot {

@@ -1,6 +1,6 @@
 // Command tinycast 是轻量级直播推流平台的业务后端。
 //
-// 它只负责鉴权、房间生命周期与观看人数统计；音视频转发由 SRS 完成。
+// 它只负责鉴权、房间生命周期与观看人数统计；音视频转发由 MediaMTX 完成。
 package main
 
 import (
@@ -22,9 +22,9 @@ import (
 	"tinycast/internal/config"
 	"tinycast/internal/httpapi"
 	"tinycast/internal/hub"
-	"tinycast/internal/janitor"
 	"tinycast/internal/logfile"
-	"tinycast/internal/srsapi"
+	"tinycast/internal/monitor"
+	"tinycast/internal/mtx"
 )
 
 func main() {
@@ -80,29 +80,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	h := hub.New(hub.Options{Grace: cfg.RoomGrace})
-	go h.Run(ctx)
+	h := hub.New(cfg.RoomGrace)
 
-	var inspector *srsapi.Inspector
-	if cfg.SRS.ClientsAPIURL != "" {
-		inspector = srsapi.New(cfg.SRS.ClientsAPIURL, cfg.SRS.ClientsAPIUser, cfg.SRS.ClientsAPIPassword)
-		logger.Info("已启用 SRS 在线状态核对", "endpoint", cfg.SRS.ClientsAPIURL)
-	}
-
-	runner := janitor.New(janitor.Options{
-		Hub:       h,
-		Log:       logger,
-		Interval:  cfg.JanitorInterval,
-		App:       cfg.SRS.App,
-		Inspector: inspector,
+	mtxClient := mtx.New(cfg.MediaMTX.APIURL, cfg.MediaMTX.APIUser, cfg.MediaMTX.APIPassword)
+	mon := monitor.New(h, mtxClient, monitor.Options{
+		App:            cfg.MediaMTX.App,
+		Interval:       cfg.MonitorInterval,
+		ViewerTimeout:  cfg.ViewerTimeout,
+		BindingTimeout: cfg.PendingTimeout,
+		Logger:         logger,
 	})
-	go runner.Run(ctx)
+	go mon.Run(ctx)
+	logger.Info("已启动 MediaMTX 状态巡检", "api", cfg.MediaMTX.APIURL, "app", cfg.MediaMTX.App, "interval", cfg.MonitorInterval.String())
 
-	if cfg.SRS.CallbackSecret == "" {
-		logger.Warn("未配置 SRS_CALLBACK_SECRET，回调接口仅依赖来源 IP 白名单保护")
+	if cfg.MediaMTX.AuthSecret == "" {
+		logger.Warn("未配置 MEDIAMTX_AUTH_SECRET，鉴权回调仅依赖来源 IP 白名单保护")
 	}
-	if cfg.SRS.RTCProxyTarget == "" && cfg.SRS.RTCPublicBase == "" {
-		logger.Warn("未配置 SRS_RTC_PROXY_TARGET 或 SRS_RTC_PUBLIC_BASE，WebRTC 信令需要由反向代理转发 /rtc/")
+	if cfg.MediaMTX.WHEPProxyTarget == "" && cfg.MediaMTX.HLSProxyTarget == "" {
+		logger.Warn("未配置 MediaMTX 播放代理地址，播放需要由外部反向代理转发 /rtc/ 与 /hls/")
 	}
 
 	server := &http.Server{
@@ -127,9 +122,10 @@ func run() error {
 	go func() {
 		logger.Info("tinycast 已启动",
 			"addr", cfg.HTTPAddr,
-			"app", cfg.SRS.App,
+			"app", cfg.MediaMTX.App,
 			"grace", cfg.RoomGrace.String(),
-			"janitor", cfg.JanitorInterval.String(),
+			"monitor", cfg.MonitorInterval.String(),
+			"viewerTimeout", cfg.ViewerTimeout.String(),
 		)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

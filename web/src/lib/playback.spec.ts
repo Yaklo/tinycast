@@ -1,86 +1,102 @@
 import { describe, expect, it } from 'vitest'
-import { describeMedia, isHEVC, isUnsupportedProfile, mediaIssue, noFrameHint } from './playback'
+import {
+  codecLabel,
+  describeMedia,
+  isAV1,
+  isH265,
+  isUnsupportedProfile,
+  mediaIssue,
+  noFrameHint,
+} from './playback'
 
-describe('isHEVC', () => {
-  it('识别 SRS 上报的 HEVC 与常见写法', () => {
-    expect(isHEVC('HEVC')).toBe(true)
-    expect(isHEVC('hevc')).toBe(true)
-    expect(isHEVC('H265')).toBe(true)
-    expect(isHEVC('H.265')).toBe(true)
-  })
-
-  it('不把 H.264 当成 HEVC', () => {
-    expect(isHEVC('H264')).toBe(false)
-    expect(isHEVC(undefined)).toBe(false)
-    expect(isHEVC('')).toBe(false)
+describe('codecLabel', () => {
+  it('把后端的编码名转成界面写法', () => {
+    expect(codecLabel('H264')).toBe('H.264')
+    expect(codecLabel('h264')).toBe('H.264')
+    expect(codecLabel('H265')).toBe('H.265')
+    expect(codecLabel('HEVC')).toBe('H.265')
+    expect(codecLabel('AV1')).toBe('AV1')
+    expect(codecLabel('MPEG-4 Audio')).toBe('AAC')
+    expect(codecLabel('Opus')).toBe('Opus')
+    expect(codecLabel(undefined)).toBe('')
   })
 })
 
-describe('isUnsupportedProfile', () => {
-  it('4:4:4 / 4:2:2 / 10bit 视为不支持', () => {
-    expect(isUnsupportedProfile('High 4:4:4 Predictive')).toBe(true)
-    expect(isUnsupportedProfile('High 4:2:2')).toBe(true)
-    expect(isUnsupportedProfile('10bit')).toBe(true)
+describe('编码判断', () => {
+  it('识别 H.265 与 AV1', () => {
+    expect(isH265('H265')).toBe(true)
+    expect(isH265('hevc')).toBe(true)
+    expect(isH265('H264')).toBe(false)
+    expect(isAV1('av1')).toBe(true)
+    expect(isAV1('H265')).toBe(false)
   })
 
-  it('常规档次视为支持', () => {
+  it('识别浏览器解不了的档次', () => {
+    expect(isUnsupportedProfile('High 4:4:4 Predictive')).toBe(true)
+    expect(isUnsupportedProfile('4:2:2')).toBe(true)
+    expect(isUnsupportedProfile('Main 10bit')).toBe(true)
     expect(isUnsupportedProfile('High')).toBe(false)
-    expect(isUnsupportedProfile('Baseline')).toBe(false)
     expect(isUnsupportedProfile(undefined)).toBe(false)
   })
 })
 
 describe('mediaIssue', () => {
-  it('没有编码信息时不提示', () => {
+  it('没有编码信息时不做判断', () => {
     expect(mediaIssue(null)).toBeNull()
-    expect(mediaIssue(undefined)).toBeNull()
     expect(mediaIssue({})).toBeNull()
   })
 
-  it('H.265 给出错误级提示并指引改成 H.264', () => {
-    const issue = mediaIssue({ videoCodec: 'HEVC', videoProfile: 'Main', width: 640, height: 360 })
+  it('H.265 在 WebRTC 下是硬伤，并建议切到 HLS', () => {
+    const issue = mediaIssue({ videoCodec: 'H265' }, 'webrtc')
     expect(issue?.level).toBe('error')
-    expect(issue?.detail).toContain('H.264')
+    expect(issue?.suggestMode).toBe('hls')
     expect(issue?.title).toContain('H.265')
   })
 
-  it('4:4:4 档次给出错误级提示', () => {
-    const issue = mediaIssue({ videoCodec: 'H264', videoProfile: 'High 4:4:4 Predictive' })
-    expect(issue?.level).toBe('error')
-    expect(issue?.title).toContain('4:4:4')
-    expect(issue?.detail).toContain('4:2:0')
+  it('H.265 在 HLS 下只提示兼容性', () => {
+    const issue = mediaIssue({ videoCodec: 'H265' }, 'hls')
+    expect(issue?.level).toBe('warn')
+    expect(issue?.detail).toContain('Firefox')
   })
 
-  it('正常 H.264 High 不提示', () => {
-    expect(mediaIssue({ videoCodec: 'H264', videoProfile: 'High', width: 1280, height: 720 })).toBeNull()
+  it('AV1 在 WebRTC 下建议切换，在 HLS 下仅提示', () => {
+    expect(mediaIssue({ videoCodec: 'AV1' }, 'webrtc')?.suggestMode).toBe('hls')
+    expect(mediaIssue({ videoCodec: 'AV1' }, 'hls')?.level).toBe('warn')
+  })
+
+  it('4:4:4 / 10bit 两种通道都放不出来', () => {
+    for (const mode of ['hls', 'webrtc'] as const) {
+      const issue = mediaIssue({ videoCodec: 'H264', videoProfile: 'High 4:4:4' }, mode)
+      expect(issue?.level).toBe('error')
+      expect(issue?.suggestMode).toBeUndefined()
+    }
+  })
+
+  it('正常 H.264 不报问题', () => {
+    expect(mediaIssue({ videoCodec: 'H264', videoProfile: 'High' }, 'hls')).toBeNull()
+    expect(mediaIssue({ videoCodec: 'H264', videoProfile: 'High' }, 'webrtc')).toBeNull()
   })
 })
 
 describe('noFrameHint', () => {
-  it('已知是 H.265 时复述编码原因，而不是让用户查防火墙', () => {
-    const hint = noFrameHint({ videoCodec: 'HEVC' })
-    expect(hint).toContain('H.265')
-    expect(hint).not.toContain('UDP 8000')
+  it('优先给出编码层面的解释', () => {
+    expect(noFrameHint({ videoCodec: 'H265' }, 'webrtc')).toContain('H.265')
   })
 
-  it('编码未知时列出防火墙、编码、candidate 三类常见原因', () => {
-    const hint = noFrameHint(null)
-    expect(hint).toContain('UDP 8000')
-    expect(hint).toContain('H.264')
-    expect(hint).toContain('candidate')
+  it('HLS 与 WebRTC 给不同的排查方向', () => {
+    const hls = noFrameHint(null, 'hls')
+    expect(hls).toContain('MEDIAMTX_HLS_PROXY_TARGET')
+    const webrtc = noFrameHint(null, 'webrtc')
+    expect(webrtc).toContain('UDP 8000')
   })
 })
 
 describe('describeMedia', () => {
   it('拼出编码、分辨率与档次', () => {
-    expect(describeMedia({ videoCodec: 'H264', videoProfile: 'High', width: 1280, height: 720 })).toBe(
-      'H264 · 1280×720 · High',
+    expect(describeMedia({ videoCodec: 'H264', width: 1920, height: 1080, videoProfile: 'High' })).toBe(
+      'H.264 · 1920×1080 · High',
     )
-  })
-
-  it('信息不全时不出现多余分隔符', () => {
-    expect(describeMedia({ videoCodec: 'H264' })).toBe('H264')
+    expect(describeMedia({ videoCodec: 'H265' })).toBe('H.265')
     expect(describeMedia(null)).toBe('')
-    expect(describeMedia({})).toBe('')
   })
 })

@@ -37,6 +37,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, code, body.message ?? '请求失败（' + res.status + '）')
   }
 
+  if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
@@ -54,4 +55,24 @@ export function fetchPlay(username: string): Promise<PlayResponse> {
 
 export function fetchConfig(): Promise<AppConfig> {
   return request<AppConfig>('/api/config')
+}
+
+/**
+ * 观看心跳：既是"进入房间"，也是"我还在这"。
+ *
+ * 后端用 viewerId 去重，因此同一个标签页反复心跳只会算一个观众；
+ * 关掉标签页后心跳停止，超时后自动从人数里移除。
+ */
+export function postWatch(username: string, viewerId: string): Promise<{ room: unknown }> {
+  return request<{ room: unknown }>('/api/rooms/' + encodeURIComponent(username) + '/watch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ viewerId }),
+  })
+}
+
+/** 主动离开房间时调用，人数立刻减一，不用等心跳超时。 */
+export function deleteWatch(username: string, viewerId: string): Promise<void> {
+  const query = '?viewerId=' + encodeURIComponent(viewerId)
+  return request<void>('/api/rooms/' + encodeURIComponent(username) + '/watch' + query, { method: 'DELETE' })
 }

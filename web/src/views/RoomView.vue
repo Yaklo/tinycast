@@ -2,10 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import StatusBadge from '../components/StatusBadge.vue'
-import WebRTCPlayer from '../components/WebRTCPlayer.vue'
+import LivePlayer from '../components/LivePlayer.vue'
 import { ApiError, fetchRoom } from '../api'
 import { roomsState, findRoom } from '../composables/useRooms'
 import { useCountdown } from '../composables/useCountdown'
+import { useWatch } from '../composables/useWatch'
 import { formatAgo, formatClock } from '../lib/format'
 import { mediaIssue } from '../lib/playback'
 import type { MediaInfo, RoomView } from '../types'
@@ -17,10 +18,21 @@ const fallback = ref<RoomView | null>(null)
 const loading = ref(true)
 const notFound = ref(false)
 const fetchError = ref('')
-/** 推流编码信息（来自 SRS），用于在播放前就提示"H.265 浏览器放不了"。 */
+/** 推流编码信息（来自 MediaMTX 的 paths API），用于在播放前就提示"H.265 能不能放"。 */
 const media = ref<MediaInfo | null>(null)
 
-const issue = computed(() => mediaIssue(media.value))
+/**
+ * 观众心跳：进入房间即开始上报，离开页面时主动下线。
+ * 后端按 viewerId 去重，因此 WebRTC 与 HLS 两种播放模式下的人数口径一致。
+ */
+useWatch(() => username.value)
+
+/** 页面顶部只提示"换通道也救不了"的硬错误（例如 4:4:4 / 10bit），
+ *  H.265 这类"切到 HLS 就能看"的情况交给播放器自己解释。 */
+const issue = computed(() => {
+  const found = mediaIssue(media.value, 'hls')
+  return found && found.level === 'error' ? found : null
+})
 
 /** 以 SSE 快照为准；快照尚未到达时用一次请求兜底，快照到达后不再使用兜底数据。 */
 const room = computed<RoomView | null>(() =>
@@ -42,7 +54,7 @@ async function load(): Promise<void> {
   try {
     const data = await fetchRoom(username.value)
     fallback.value = data.room
-    media.value = data.media ?? null
+    media.value = data.room.media ?? null
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       notFound.value = true
@@ -61,7 +73,7 @@ async function load(): Promise<void> {
 async function loadMedia(): Promise<void> {
   try {
     const data = await fetchRoom(username.value)
-    media.value = data.media ?? null
+    media.value = data.room.media ?? null
   } catch {
     // 编码信息只是提示增强，拿不到就按"未知"处理
   }
@@ -126,18 +138,13 @@ watch(
         </div>
       </header>
 
-      <p v-if="room.warning === 'stream_unparsed'" class="media-warn">
-        主播的推流码没有被服务器正确解析（房间名里有未编码的字符），观众端会一直黑屏。
-        请让主播回到首页「创建推流配置」重新复制推流码后再推流。
-      </p>
-
       <p v-if="room.state === 'LIVE' && issue" class="media-warn">
         {{ issue.title }}。{{ issue.detail }}
       </p>
 
       <div class="layout">
         <div class="stage">
-          <WebRTCPlayer v-if="room.state === 'LIVE'" :room="room" :media="media" />
+          <LivePlayer v-if="room.state === 'LIVE'" :room="room" :media="media" />
 
           <div v-else class="grace">
             <div class="grace-inner">

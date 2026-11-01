@@ -1,20 +1,30 @@
 package config
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
-// setenv 用一个 map 覆盖环境变量，测试结束后自动还原。
-func setenv(t *testing.T, env map[string]string) {
+// clearEnv 清空所有与 tinycast 相关的环境变量，让每个用例从默认值开始。
+func clearEnv(t *testing.T) {
 	t.Helper()
-	for k, v := range env {
-		t.Setenv(k, v)
+	for _, key := range []string{
+		"HTTP_ADDR", "ROOM_GRACE", "MONITOR_INTERVAL", "VIEWER_TIMEOUT", "PENDING_TIMEOUT",
+		"CORS_ALLOWED_ORIGINS", "PUBLIC_BASE_URL",
+		"MEDIAMTX_APP", "MEDIAMTX_API_URL", "MEDIAMTX_API_USER", "MEDIAMTX_API_PASSWORD",
+		"MEDIAMTX_AUTH_SECRET", "MEDIAMTX_AUTH_ALLOWED_CIDRS", "MEDIAMTX_WHEP_PROXY_TARGET",
+		"MEDIAMTX_HLS_PROXY_TARGET", "MEDIAMTX_RTMP_PUBLIC_BASE",
+	} {
+		t.Setenv(key, "")
+		os.Unsetenv(key)
 	}
 }
 
-// 默认配置应满足需求：5 分钟保留期、live 应用、内网白名单。
 func TestLoadDefaults(t *testing.T) {
+	clearEnv(t)
+
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("默认配置应可用，实际报错: %v", err)
@@ -25,146 +35,90 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RoomGrace != 5*time.Minute {
 		t.Fatalf("默认保留期应为 5 分钟，实际 %s", cfg.RoomGrace)
 	}
-	if cfg.SRS.App != "live" {
-		t.Fatalf("默认应用名应为 live，实际 %s", cfg.SRS.App)
+	if cfg.MediaMTX.App != "live" {
+		t.Fatalf("默认应用名应为 live，实际 %s", cfg.MediaMTX.App)
 	}
-	if len(cfg.SRS.CallbackAllowed) == 0 {
+	if cfg.MediaMTX.APIURL != DefaultMediaMTXAPIURL {
+		t.Fatalf("默认控制接口地址不符：%s", cfg.MediaMTX.APIURL)
+	}
+	if len(cfg.MediaMTX.AuthAllowed) == 0 {
 		t.Fatal("默认应带内网回调白名单")
+	}
+	if cfg.MonitorInterval != time.Second {
+		t.Fatalf("默认巡检间隔应为 1s，实际 %s", cfg.MonitorInterval)
 	}
 }
 
-// 保留期既支持 Go 时长写法，也支持纯秒数。
 func TestLoadRoomGraceFormats(t *testing.T) {
-	cases := map[string]time.Duration{
+	for raw, want := range map[string]time.Duration{
 		"90s":   90 * time.Second,
 		"300":   300 * time.Second,
 		"2m30s": 150 * time.Second,
+	} {
+		clearEnv(t)
+		t.Setenv("ROOM_GRACE", raw)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("ROOM_GRACE=%s 应可用: %v", raw, err)
+		}
+		if cfg.RoomGrace != want {
+			t.Fatalf("ROOM_GRACE=%s 解析为 %s，期望 %s", raw, cfg.RoomGrace, want)
+		}
 	}
-	for raw, want := range cases {
-		t.Run(raw, func(t *testing.T) {
-			setenv(t, map[string]string{"ROOM_GRACE": raw})
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("加载配置失败: %v", err)
+}
+
+func TestLoadRejectsInvalidValues(t *testing.T) {
+	cases := map[string]map[string]string{
+		"保留期为负":    {"ROOM_GRACE": "-1m"},
+		"巡检间隔为零":   {"MONITOR_INTERVAL": "0s"},
+		"心跳超时为零":   {"VIEWER_TIMEOUT": "0s"},
+		"绑定期限为零":   {"PENDING_TIMEOUT": "0s"},
+		"应用名带斜杠":   {"MEDIAMTX_APP": "live/x"},
+		"控制接口地址非法": {"MEDIAMTX_API_URL": "127.0.0.1:9997"},
+		"网段非法":     {"MEDIAMTX_AUTH_ALLOWED_CIDRS": "127.0.0.1"},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			clearEnv(t)
+			for k, v := range env {
+				t.Setenv(k, v)
 			}
-			if cfg.RoomGrace != want {
-				t.Fatalf("ROOM_GRACE=%s 应解析为 %s，实际 %s", raw, want, cfg.RoomGrace)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s 应报错", name)
 			}
 		})
 	}
 }
 
-// 非正的保留期必须被拒绝，否则房间永远不会被释放。
-func TestLoadRejectsInvalidGrace(t *testing.T) {
-	setenv(t, map[string]string{"ROOM_GRACE": "-1s"})
-	if _, err := Load(); err == nil {
-		t.Fatal("负的保留期应导致配置错误")
-	}
-}
+func TestLoadAuthAllowedCIDRs(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MEDIAMTX_AUTH_ALLOWED_CIDRS", "10.1.0.0/16, 192.168.5.0/24")
 
-// 非法 CIDR 必须被拒绝。
-func TestLoadRejectsInvalidCIDR(t *testing.T) {
-	setenv(t, map[string]string{"SRS_CALLBACK_ALLOWED_CIDRS": "10.0.0.0/8,not-a-cidr"})
-	if _, err := Load(); err == nil {
-		t.Fatal("非法网段应导致配置错误")
-	}
-}
-
-// 自定义网段会替换默认白名单。
-func TestLoadCustomCIDRs(t *testing.T) {
-	setenv(t, map[string]string{"SRS_CALLBACK_ALLOWED_CIDRS": "172.20.0.0/16,::1/128"})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.SRS.CallbackAllowed) != 2 {
-		t.Fatalf("白名单应包含 2 个网段，实际 %d", len(cfg.SRS.CallbackAllowed))
+	if len(cfg.MediaMTX.AuthAllowed) != 2 {
+		t.Fatalf("应解析出 2 个网段，实际 %d", len(cfg.MediaMTX.AuthAllowed))
 	}
-}
-
-// 绝对地址类配置必须同时带协议与主机。
-func TestLoadValidatesURLs(t *testing.T) {
-	setenv(t, map[string]string{"SRS_RTC_PROXY_TARGET": "srs:1985"})
-	if _, err := Load(); err == nil {
-		t.Fatal("缺少协议的代理地址应导致配置错误")
-	}
-
-	t.Setenv("SRS_RTC_PROXY_TARGET", "http://srs:1985")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("合法代理地址应被接受: %v", err)
-	}
-	if cfg.SRS.RTCProxyTarget != "http://srs:1985" {
-		t.Fatalf("代理地址解析错误: %s", cfg.SRS.RTCProxyTarget)
+	if cfg.MediaMTX.AuthAllowed[0].String() != "10.1.0.0/16" {
+		t.Fatalf("网段解析错误：%s", cfg.MediaMTX.AuthAllowed[0])
 	}
 }
 
-// 地址尾部的斜杠会被去掉，避免拼出双斜杠。
-func TestLoadTrimsTrailingSlash(t *testing.T) {
-	setenv(t, map[string]string{
-		"PUBLIC_BASE_URL":        "https://live.example.com/",
-		"SRS_RTMP_PUBLIC_BASE":   "rtmp://live.example.com/live/",
-		"SRS_WEBRTC_PUBLIC_BASE": "webrtc://live.example.com/live/",
-		"SRS_CLIENTS_API_URL":    "http://127.0.0.1:1985/api/v1/clients/",
-		"SRS_RTC_PROXY_TARGET":   "http://127.0.0.1:1985/",
-		"SRS_RTC_PUBLIC_BASE":    "https://live.example.com/",
-		"SRS_CALLBACK_SECRET":    " secret-value ",
-		"CORS_ALLOWED_ORIGINS":   " https://a.example.com , https://b.example.com ",
-		"SRS_CALLBACK_ALLOW_ALL": "false",
-	})
+func TestLoadTrimsTrailingSlashes(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MEDIAMTX_WHEP_PROXY_TARGET", "http://127.0.0.1:8889/")
+	t.Setenv("MEDIAMTX_RTMP_PUBLIC_BASE", "rtmp://live.example.com/live/")
+
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
-	for name, got := range map[string]string{
-		"PUBLIC_BASE_URL":        cfg.PublicBaseURL,
-		"SRS_RTMP_PUBLIC_BASE":   cfg.SRS.RTMPPublicBase,
-		"SRS_WEBRTC_PUBLIC_BASE": cfg.SRS.WebRTCPublicBase,
-		"SRS_CLIENTS_API_URL":    cfg.SRS.ClientsAPIURL,
-		"SRS_STREAMS_API_URL":    cfg.SRS.StreamsAPIURL,
-		"SRS_RTC_PROXY_TARGET":   cfg.SRS.RTCProxyTarget,
-		"SRS_RTC_PUBLIC_BASE":    cfg.SRS.RTCPublicBase,
-	} {
-		if got == "" || got[len(got)-1] == '/' {
-			t.Fatalf("%s 不应以斜杠结尾，实际 %q", name, got)
-		}
+	if strings.HasSuffix(cfg.MediaMTX.WHEPProxyTarget, "/") {
+		t.Fatalf("代理地址不应带结尾斜杠：%s", cfg.MediaMTX.WHEPProxyTarget)
 	}
-	if cfg.SRS.CallbackSecret != "secret-value" {
-		t.Fatalf("密钥应被去除首尾空白，实际 %q", cfg.SRS.CallbackSecret)
-	}
-	if len(cfg.CORSOrigins) != 2 || cfg.CORSOrigins[0] != "https://a.example.com" {
-		t.Fatalf("CORS 列表解析错误: %v", cfg.CORSOrigins)
-	}
-}
-
-// 只配置 clients 接口时，streams 接口地址应由同一台 SRS 推导出来。
-func TestLoadDerivesStreamsURL(t *testing.T) {
-	setenv(t, map[string]string{"SRS_CLIENTS_API_URL": "http://srs:1985/api/v1/clients/"})
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
-	}
-	if cfg.SRS.StreamsAPIURL != "http://srs:1985/api/v1/streams" {
-		t.Fatalf("应先推导出 streams 地址，实际 %q", cfg.SRS.StreamsAPIURL)
-	}
-}
-
-// 显式配置的 streams 地址优先，且非法地址必须被拒绝。
-func TestLoadStreamsURLOverride(t *testing.T) {
-	setenv(t, map[string]string{
-		"SRS_CLIENTS_API_URL": "http://srs:1985/api/v1/clients/",
-		"SRS_STREAMS_API_URL": "http://127.0.0.1:1986/api/v1/streams/",
-	})
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
-	}
-	if cfg.SRS.StreamsAPIURL != "http://127.0.0.1:1986/api/v1/streams" {
-		t.Fatalf("显式配置应优先（并去掉结尾斜杠），实际 %q", cfg.SRS.StreamsAPIURL)
-	}
-
-	setenv(t, map[string]string{"SRS_STREAMS_API_URL": "srs:1985"})
-	if _, err := Load(); err == nil {
-		t.Fatal("缺少协议的 streams 地址应被拒绝")
+	if strings.HasSuffix(cfg.MediaMTX.RTMPPublicBase, "/") {
+		t.Fatalf("RTMP 地址不应带结尾斜杠：%s", cfg.MediaMTX.RTMPPublicBase)
 	}
 }

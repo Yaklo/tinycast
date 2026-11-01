@@ -1,329 +1,248 @@
 # TinyCast
 
-极简的直播推流平台：**OBS 推流 → 浏览器直接观看**。
+轻量直播推流平台：**OBS 推流 → 浏览器直接观看**，双击就能跑。
 
-- 无需注册登录，无需数据库，所有业务状态都在 Go 进程内存里
-- SRS 6 负责 RTMP 接入与 WebRTC 分发，Go 只做鉴权、房间生命周期与在线人数
-- 前端 Vue 3 + TypeScript + Vite，播放走 WebRTC（WHEP），状态通过 SSE 实时推送
-- 推流身份（用户名 + 推流令牌）由 Go 后端严格校验，令牌只存 SHA-256 哈希
+- 无需注册登录、无需数据库，业务状态全在 Go 进程内存里，进程退出即清空
+- **MediaMTX** 负责 RTMP 接入与 HLS / WebRTC 分发，Go 只做推流鉴权、房间生命周期与在线人数
+- 前端 Vue 3 + TypeScript + Vite，播放器默认 HLS（有声音、支持 H.265），可切到 WebRTC 低延迟
+- 推流身份（用户名 + 令牌）由后端严格校验，令牌只存 SHA-256 哈希
+- 单个 Go 二进制内嵌全部前端资源，部署只有两个进程：mediamtx + tinycast
 
 ## 功能
 
 | 能力 | 说明 |
 | --- | --- |
-| 创建推流配置 | 首页填写用户名与房间名称，浏览器本地生成 ≥256 bit 随机推流令牌，不请求后端 |
-| OBS 推流 | 复制服务器地址与推流码即可开播 |
-| 房间生命周期 | 只有真实推流成功才创建房间，LIVE → GRACE（断流保留 5 分钟）→ RELEASED |
-| 断线重连 | 5 分钟内用原用户名 + 原令牌重新推流，房间与观看者保持不变 |
-| 实时观看 | 房间详情页通过 WebRTC 低延迟播放 |
-| 播放器控制 | 网页全屏、浏览器全屏（双击画面亦可切换）、画中画；网页全屏可用 Esc 退出 |
-| 播放统计 | 🩺 面板展示编码、分辨率、帧率、音视频码率、丢包、抖动、缓冲延迟、往返时延，默认绘制最近 60 秒的下载速率曲线 |
-| 在线人数 | 基于 SRS on_play / on_stop 回调统计有效观看会话，SSE 实时更新 |
-| 断流兜底 | 定时任务核对 SRS 客户端列表，清理丢回调造成的僵尸会话 |
+| 创建推流配置 | 首页填用户名与房间名，浏览器用 `crypto.getRandomValues()` 生成 ≥256 bit 令牌，不请求后端 |
+| OBS 推流 | 复制服务器地址与推流码即可开播，推流码整段带上 `room` 与 `token` |
+| 推流鉴权 | 用户名与令牌一一绑定；同一身份不能同时推两路；回调在服务端校验，前端改不了 |
+| 房间生命周期 | 只有真正推流成功才建房：LIVE → GRACE（断流保留 5 分钟）→ 释放 |
+| 断线重连 | 5 分钟内用原用户名 + 原令牌重推，房间与观看者保持不变 |
+| 双通道播放 | 默认 HLS（约 1 秒、有声音）；可切 WebRTC（约 0.3 秒、无声音，见下文说明） |
+| 播放器控制 | 网页全屏、浏览器全屏（双击画面亦可）、画中画，Esc 退出网页全屏 |
+| 播放统计 | 🩺 面板：编码、分辨率、帧率、音视频码率、丢包、抖动、缓冲延迟、往返时延，默认画最近 60 秒下载速率曲线 |
+| 在线人数 | 播放器带稳定 `viewerId` 定时心跳，超时自动剔除；SSE 实时推送到所有页面 |
+| 异常兜底 | 心跳超时、鉴权通过却没真正推流的绑定、断流超时，都由巡检循环回收 |
 
-## 架构
-
-```
-            RTMP 1935                    WebRTC(WHEP) 1985 + UDP 8000
-  OBS ─────────────────► SRS 6 ──────────────────────────────► 浏览器
-                          │  http_hooks (on_publish/unpublish/play/stop)
-                          ▼
-                    Go 后端 (tinycast, :8080)
-                    ├── 内存状态：publishersByUsername / publishersByToken / rooms / viewers
-                    ├── /api/*          房间与配置接口
-                    ├── /api/events     SSE 快照推送
-                    ├── /internal/srs/* SRS 回调（仅内网）
-                    ├── /rtc/*          反代到 SRS HTTP API（同源 WHEP 信令）
-                    └── /               内嵌前端静态页面（go:embed）
-```
-
-SRS 与 Go 后端可在同一台服务器上，通过 http_hooks 与 HTTP API 通信；Go 二进制自带前端页面，部署时只需要两个进程。
-
-## 目录结构
+## 工作原理
 
 ```
-cmd/tinycast/            程序入口（信号处理、HTTP 服务、优雅退出）
-cmd/tinysim/             联调工具：用 HTTP 请求模拟 SRS 的四个回调（不含业务逻辑）
-internal/config/         配置加载（环境变量 + KEY=VALUE 配置文件）
-internal/logfile/        按大小滚动的日志写入器
-internal/hub/            内存状态中心：推流鉴权、房间生命周期、观看会话、SSE 广播
-internal/httpapi/        HTTP 路由、SSE、SRS 回调、中间件
-internal/srsapi/         SRS HTTP API 客户端（客户端列表核对）
-internal/janitor/        定时任务：超时释放 + 僵尸会话核对
-internal/webui/          前端产物嵌入与 SPA 回退
-web/                     Vue 3 + TypeScript + Vite 前端
-deploy/srs/srs.conf      SRS 6 配置（RTMP + WebRTC + 回调）
-deploy/systemd/          Linux systemd 单元与环境变量样例
-deploy/windows/          Windows 生产运行包：env 配置、启动脚本、部署说明
-scripts/                 构建、开发与 SRS 下载脚本
+                    RTMP 1935
+  OBS ───────────────────────────────► MediaMTX ──────► HLS 8888 ─┐
+   │                                      │  ▲                     ├─► 浏览器
+   │  username?room=..&token=..           │  │ 媒体              │   （同源，经 Go 反代）
+   │                                      │  └────► WebRTC 8889 ──┘
+   │                        auth 回调（publish / read）
+   ▼                                      ▼
+                      Go 后端 tinycast :8080
+                      ├── /internal/mtx/auth  推流鉴权（仅内网）
+                      ├── 轮询 /v3/paths/list 判断推流开/停 → 房间状态
+                      ├── /api/*              房间、配置、心跳
+                      ├── /api/events         SSE 快照推送
+                      ├── /hls/*  /rtc/*      反代到 MediaMTX（浏览器只跟 Go 同源交互）
+                      └── /                   内嵌前端（go:embed）
 ```
 
-## 快速开始（Docker Compose）
+两个进程可以同机也可以容器编排。浏览器全程只访问 8080，媒体端口无需对外暴露（WebRTC 的 UDP 8000 除外）。
+
+## 快速开始（Docker）
 
 ```bash
-cp .env.example .env         # 修改 SRS_CANDIDATE 为服务器公网 IP 或域名
+# 1. 改一下对外地址（可选，局域网/公网访问时填服务器 IP 或域名）
+cp .env.example .env
+# 2. 起服务
 docker compose up -d --build
+# 3. 打开 http://<服务器地址>:8080
 ```
 
-- 页面：http://<服务器IP>:8080
-- RTMP 推流：rtmp://<服务器IP>/live
-- 需要放通的端口：1935/tcp（推流）、8000/udp（WebRTC 媒体）、8080/tcp（页面与接口）；1985/tcp 只在需要跨机部署或调试时开放。
+正式部署记得改 `deploy/mediamtx/mediamtx.docker.yml` 里的 `webrtcAdditionalHosts` 与 compose 里的
+`MEDIAMTX_RTMP_PUBLIC_BASE`，否则观众拿到的候选地址仍是 `127.0.0.1`。
 
-## 手动部署
-
-### Linux
+## 手动部署（Linux）
 
 ```bash
-./scripts/build.sh            # 生成 bin/tinycast（前端已内嵌）
-sudo mkdir -p /opt/tinycast /etc/tinycast
-sudo cp bin/tinycast /opt/tinycast/
-sudo cp deploy/systemd/tinycast.env.example /etc/tinycast/tinycast.env   # 按需修改
-sudo cp deploy/systemd/tinycast.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now tinycast
+# MediaMTX：官方单文件程序
+curl -L -o /tmp/mtx.tar.gz https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_amd64.tar.gz
+sudo tar -xzf /tmp/mtx.tar.gz -C /usr/local/bin mediamtx
+sudo install -d /etc/mediamtx && sudo install -m 640 deploy/mediamtx/mediamtx.yml /etc/mediamtx/mediamtx.yml
+
+# TinyCast：自带前端
+./scripts/build.sh
+sudo install -m 755 bin/tinycast /usr/local/bin/tinycast
+sudo install -d /etc/tinycast && sudo install -m 640 deploy/systemd/tinycast.env.example /etc/tinycast/tinycast.env
+
+# systemd
+sudo install -m 644 deploy/systemd/mediamtx.service deploy/systemd/tinycast.service /etc/systemd/system/
+sudo useradd -r -s /usr/sbin/nologin mediamtx -d /var/lib/mediamtx   # 首次
+sudo useradd -r -s /usr/sbin/nologin tinycast
+sudo systemctl daemon-reload && sudo systemctl enable --now mediamtx tinycast
 ```
 
-SRS 侧：把 deploy/srs/srs.conf 中四个回调地址里的 tinycast 换成 127.0.0.1，复制到 SRS 的 conf/ 目录后用 ./objs/srs -c conf/srs.conf 启动（也可直接使用 deploy/systemd/srs.service）。
+改 `/etc/tinycast/tinycast.env` 后 `sudo systemctl restart tinycast` 生效。
 
-### Windows
-
-Windows 侧推荐直接使用下面「Windows 生产运行包」，它把二进制、配置、启动脚本和 SRS 放在一起，
-复制到目标机器就能跑。如果机器上已经装好 Go 与 Node，也可以就地构建：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\build.ps1   # 构建 bin\tinycast.exe
-powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1     # 读取 tinycast.env 启动
-```
-
-### Windows 生产运行包（自带 SRS 6）
-
-Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编译，产出一个可整目录拷走的运行包——前端已内嵌进 `tinycast.exe`，SRS 6 以官方 Windows 构建的形式放在 `srs/` 子目录里。
+## Windows 运行包
 
 ```bash
-./scripts/package-windows.sh     # 一条命令：构建 tinycast.exe + 准备 SRS 6 + 打成 zip
+./scripts/package-windows.sh     # 产出 bin/tinycast-windows-amd64.zip（含 mediamtx.exe）
 ```
 
-也可以分步执行：
+解压后右键 `open-firewall.cmd` → 以管理员身份运行，再双击 `start-all.cmd`，浏览器会自动打开。
+详细步骤见包内 `部署说明.txt`。
 
-```bash
-./scripts/build.sh --windows     # 交叉编译 tinycast.exe，并生成包内配置与启动脚本
-./scripts/fetch-srs-windows.sh   # 放入 SRS 6 官方 Windows 构建（约 42MB，不入库）
-```
+## OBS 配置
 
-产物 `bin/windows-amd64/`：
-
-| 文件 | 作用 |
+| 项目 | 值 |
 | --- | --- |
-| `tinycast.exe` | 业务后端，前端页面已内嵌，单文件即可运行 |
-| `tinycast.env` | 全部运行配置（KEY=VALUE，逐项带注释），由 `-config` 读取 |
-| `start-all.cmd` | 生产启动：先拉起 SRS，再启动 tinycast 并打开首页 |
-| `start.cmd` | 只启动 tinycast（SRS 在别处时用），可传参如 `start.cmd -open` |
-| `open-firewall.cmd` | 右键「以管理员身份运行」，一次性放通 TCP 1935/8080/1985 与 UDP 8000 |
-| `srs/objs/srs.exe` | SRS 6.0.172 官方 Cygwin 构建，附 5 个 Cygwin 运行库（含官方包缺失的 cygiconv-2.dll、cygintl-8.dll） |
-| `srs/conf/srs.conf` | 由 [deploy/srs/srs.windows.conf](deploy/srs/srs.windows.conf) 复制，四个回调指向 `http://127.0.0.1:8080/internal/srs/*` |
-| `logs/`、`srs/logs/` | 运行日志目录，tinycast 日志默认 16MB 滚动、保留 3 份 |
-| `部署说明.txt` | 目录说明、上机步骤、局域网/HTTPS 改造、排查表 |
+| 服务 | 自定义 |
+| 服务器 | `rtmp://127.0.0.1:1935/live`（对外部署换成域名或 IP） |
+| 推流码 | `username?room=房间名&token=随机令牌`（页面生成，整段复制） |
 
-上机步骤：
+> 推流码请**整段复制**，不要手动改房间名。页面生成时房间名已经做过 URL 编码，
+> OBS 还会再解一次；手改容易变成非法 URL 导致 MediaMTX 无法识别路径。
 
-1. 把整个 `bin/windows-amd64/` 目录拷到 Windows 机器（例如 `D:\tinycast`）；
-2. 双击 `start-all.cmd`：弹出 SRS 窗口，当前窗口运行 tinycast，浏览器自动打开 http://127.0.0.1:8080 ；
-3. 首页「创建推流配置」→ 得到服务器地址 `rtmp://127.0.0.1:1935/live` 与推流码 `alex?room=房间名&token=<令牌>`；
-4. OBS → 设置 → 直播 → 服务选「自定义」，填入两项后开始推流；
-5. 首页立刻出现 LIVE 房间，点进去看 WebRTC 画面，在线人数随观看者增减；OBS 停止推流后房间进入 GRACE 并倒计时，5 分钟内重推恢复 LIVE，超时释放。
+## 推流鉴权规则
 
-局域网/公网观看：包内 `candidate *` 会由 SRS 自动探测本机网卡地址，本机浏览器与局域网内其它设备一般无需改配置；云主机在 NAT 后面时要把它改成公网 IP 或域名。`tinycast.env` 里同步 `SRS_RTMP_PUBLIC_BASE`、`SRS_WEBRTC_PUBLIC_BASE`、`PUBLIC_BASE_URL`；端口用 `open-firewall.cmd`（管理员运行）一键放通 TCP 1935、TCP 8080（或 80/443）、UDP 8000。端口分工：1935/tcp RTMP、1985/tcp SRS HTTP API（仅本机）、8000/udp WebRTC、8080/tcp 页面与接口。
+规则全部在 `POST /internal/mtx/auth` 里完成，MediaMTX 每次推流/播放都会来问一次：
 
-长期运行：`tinycast.exe` 是控制台程序，Ctrl+C 即优雅停止；需要开机自启/崩溃重启时用「任务计划程序」触发 `start-all.cmd`，或用 NSSM / WinSW 把 `tinycast.exe` 注册成服务。
+1. 一个用户名只能绑定一个令牌；
+2. 一个令牌只能绑定一个用户名；
+3. 同一用户名 + 同一令牌不能同时存在两路推流；
+4. 原推流断开后，5 分钟内允许原用户名 + 原令牌重新推流；
+5. 超过 5 分钟未重推，释放用户名与令牌；
+6. 房间名仅用于展示，允许重名。
 
-SRS 的 Windows 构建取自官方 Release `v6.0-b0` 的 NSIS 安装包（sha256 固定在 [scripts/fetch-srs-windows.sh](scripts/fetch-srs-windows.sh) 中，脚本只解包，不运行安装程序、不写注册表）。官方安装包的 `objs` 目录只带三个 Cygwin 运行库，而 `cygstdc++-6.dll` 还依赖 `cygiconv-2.dll`、`cygintl-8.dll`（缺了会在 Windows 上报「由于找不到 cygiconv-2.dll，无法继续执行代码」），脚本会从 Cygwin 官方软件源补齐这两个 DLL 并做依赖闭环校验；`start-all.cmd` 启动前也会先检查这 5 个 DLL。SRS 官方把 Windows 版定位为测试用途，长期高负载生产建议用 Linux 版与 [deploy/srs/srs.conf](deploy/srs/srs.conf)。
+回调只接受内网来源（`MEDIAMTX_AUTH_ALLOWED_CIDRS`），并可加 `?secret=` 共享密钥，
+因此外网无法直接调用它伪造身份。
 
-## OBS 推流配置
-
-在首页点「创建推流配置」，填写用户名与房间名称，浏览器本地生成令牌后展示：
-
-| 项 | 值 |
-| --- | --- |
-| 服务器 | rtmp://live.example.com/live |
-| 推流码 | username?room=房间名称&token=随机令牌 |
-
-OBS「设置 → 直播 → 服务：自定义」中填入服务器与推流码即可。最终推流地址等价于 rtmp://live.example.com/live/username?room=...&token=...，SRS 会把查询串原样放进回调的 param 字段。
-
-> ⚠️ **请整段复制页面生成的推流码，不要手改房间名。**
-> 房间名里的中文会被 OBS 先解码一次，所以页面在推流码里做了双重百分号编码（OBS 解一次后线上仍是纯 ASCII）。
-> 如果手工输入未编码的中文房间名，SRS 会解析失败（code=3007 HttpParseUrl）并把整段查询串并进流名，
-> 结果是推流"看起来成功"、观众端却永久黑屏（页面会显示"推流码没有被服务器正确解析"）。
-
-- 用户名同时是 SRS 流名，因此房间详情页地址为 /r/<username>
-- 房间名称仅用于展示，不要求唯一
-- 令牌、用户名与房间名称保存在浏览器 localStorage，刷新后仍可查看，且不会上传服务器
-- 用户名规则：3–32 位，字母/数字/下划线/中划线，首字符须为字母或数字
-
-## 推流鉴权规则（Go 后端实现）
-
-1. 用户名不能绑定多个不同令牌
-2. 同一令牌不能绑定多个不同用户名
-3. 相同用户名 + 相同令牌不能同时建立多个推流连接（同一 SRS 客户端重复回调幂等放行）
-4. 断开后 5 分钟内允许原用户名 + 原令牌重新推流
-5. 超过 5 分钟未重推则释放用户名与令牌（可被其他令牌/用户名重新占用）
-6. 房间名称不参与唯一性约束
-
-房间状态机：
+## 房间状态机
 
 ```
-on_publish 校验通过 ──► LIVE ──on_unpublish──► GRACE(5m) ──超时──► RELEASED（记录删除）
-                         ▲                        │
-                         └──── on_publish 恢复 ────┘
+（无记录） --推流成功--> LIVE --断流--> GRACE --5 分钟--> 释放（不再显示）
+                              ▲          │
+                              └──重推────┘
 ```
+
+| 状态 | 含义 | 首页 | 详情页 |
+| --- | --- | --- | --- |
+| `LIVE` | 正在推流 | 显示“直播中” | 播放实时画面 |
+| `GRACE` | 断流保留中 | 显示“断流保留”与倒计时 | 只显示提示与剩余时间，不假装播放 |
+| 释放 | 记录已删除 | 不显示 | 显示“房间已释放” |
+
+状态的来源是 `MEDIAMTX_API_URL/v3/paths/list`：路径 ready 即 LIVE，路径消失即 GRACE。
+MediaMTX 短暂不可达时保持现状，不会把全部房间打成断流。
+
+## 播放通道与编码支持
+
+| 通道 | 延迟 | 声音 | H.264 | H.265 | AV1 | 说明 |
+| --- | --- | --- | --- | --- | --- | --- |
+| HLS（默认） | ~1 秒 | 有 | ✅ | ✅* | ✅* | LL-HLS，分片在内存，不落盘 |
+| WebRTC（低延迟） | ~0.3 秒 | 无 | ✅ | ❌ | ❌ | 媒体透传不转码，浏览器只收 H.264 + Opus 等 |
+
+\* H.265/AV1 的 HLS 播放依赖系统解码能力：Chrome/Edge（Windows、macOS）与 Safari 正常，
+Linux 下的 Chrome 与 Firefox 通常不行。页面会检测编码并给出“换通道”的提示。
+
+WebRTC 通道没有声音是 MediaMTX 的设计取舍：它不做转码，AAC 无法变成浏览器能协商的编码，
+于是补一条静音的 PCMU 轨让画面能显示。需要声音就用默认 HLS。
 
 ## HTTP 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | /api/healthz | 健康检查 |
-| GET | /api/config | 应用名、RTMP 服务器地址、WebRTC 地址、保留秒数 |
-| GET | /api/rooms | 全部 LIVE + GRACE 房间 |
-| GET | /api/rooms/{username} | 单个房间详情（RELEASED 返回 404） |
-| GET | /api/rooms/{username}/play | 播放信息（GRACE 时 playback 为 null） |
-| GET | /api/events | SSE，事件名 rooms，data 为完整快照 |
-| POST | /internal/srs/on_publish | SRS 推流开始回调 |
-| POST | /internal/srs/on_unpublish | SRS 推流结束回调 |
-| POST | /internal/srs/on_play | SRS 播放开始回调 |
-| POST | /internal/srs/on_stop | SRS 播放结束回调 |
+| GET | `/api/healthz` | 健康检查 |
+| GET | `/api/config` | 前端启动配置（app、RTMP 地址、保留秒数、可用通道） |
+| GET | `/api/rooms` | 房间列表（只含 LIVE 与 GRACE） |
+| GET | `/api/rooms/{username}` | 房间详情 |
+| GET | `/api/rooms/{username}/play` | 播放信息：`hlsUrl` 与 `whepUrl`（仅 LIVE） |
+| POST | `/api/rooms/{username}/watch` | 观看心跳，`{"viewerId":"..."}` |
+| DELETE | `/api/rooms/{username}/watch?viewerId=...` | 离开 |
+| GET | `/api/events` | SSE 快照流（`event: rooms`） |
+| POST | `/internal/mtx/auth` | MediaMTX 回调，**仅内网** |
+| * | `/hls/*`、`/rtc/*` | 反代到 MediaMTX 的 HLS / WHEP（含 302 改写） |
 
-回调放行条件：HTTP 200 且响应体为 0；拒绝时返回 403、响应体 1 并带 X-Tinycast-Reason 头（SRS 会因此断开该连接），拒绝原因同时写入日志。
-
-```bash
-curl http://127.0.0.1:8080/api/rooms
-curl -N http://127.0.0.1:8080/api/events      # 持续接收快照
-```
+在线人数 = 该房间在 `VIEWER_TIMEOUT` 内有过心跳的 `viewerId` 数量。
+重复心跳天然幂等，关闭页面时前端会主动 `DELETE`。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| HTTP_ADDR | :8080 | 监听地址 |
-| LOG_LEVEL | info | debug / info / warn / error |
-| LOG_FILE | 空 | 日志文件路径，设置后按大小滚动落盘（目录自动创建） |
-| LOG_MAX_MB | 16 | 单个日志文件上限（MB） |
-| LOG_KEEP | 3 | 保留的历史日志份数 |
-| TINYCAST_ENV | 空 | 默认读取的配置文件路径，等价于 `-config` |
-| ROOM_GRACE | 5m | 断流保留时长，支持 300（秒）或 5m |
-| JANITOR_INTERVAL | 15s | 定时清理任务间隔 |
-| SRS_APP | live | SRS 应用名，需与推流地址中的 /live 一致 |
-| SRS_CALLBACK_SECRET | 空 | 回调共享密钥，配置后需在 srs.conf 回调地址后加 ?secret=... |
-| SRS_CALLBACK_ALLOWED_CIDRS | 回环 + 私网 | 允许回调的来源网段，逗号分隔 |
-| SRS_CALLBACK_ALLOW_ALL | false | 关闭来源 IP 校验（仅在反代已隔离时使用） |
-| SRS_RTMP_PUBLIC_BASE | rtmp://localhost:1935/live | 展示给推流用户的服务器地址 |
-| SRS_WEBRTC_PUBLIC_BASE | webrtc://localhost/live | 展示用的 WebRTC 地址 |
-| SRS_RTC_PROXY_TARGET | 空 | 设置后把同源 /rtc/* 反代到 SRS HTTP API |
-| SRS_RTC_PUBLIC_BASE | 空 | 设置后 WHEP 地址使用绝对地址直连 SRS |
-| SRS_CLIENTS_API_URL | 空 | SRS 客户端列表地址，设置后启用僵尸会话核对 |
-| SRS_STREAMS_API_URL | 由 SRS_CLIENTS_API_URL 推导 | SRS 流信息地址，用于读取推流编码与分辨率，在页面提前提示"编码放不了" |
-| SRS_CLIENTS_API_USER / SRS_CLIENTS_API_PASSWORD | 空 | 访问 SRS HTTP API 的 BasicAuth |
-| CORS_ALLOWED_ORIGINS | 空 | 前后端不同源时的允许来源 |
-| PUBLIC_BASE_URL | 空 | 对外访问地址（用于生成绝对链接） |
+| `HTTP_ADDR` | `:8080` | 监听地址 |
+| `PUBLIC_BASE_URL` | 空 | 对外地址，留空按浏览器地址推断 |
+| `LOG_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `info` / 空 / `16` / `3` | 日志与滚动 |
+| `ROOM_GRACE` | `5m` | 断流保留时长 |
+| `MONITOR_INTERVAL` | `1s` | 轮询 MediaMTX 路径的间隔 |
+| `VIEWER_TIMEOUT` | `30s` | 心跳超时 |
+| `PENDING_TIMEOUT` | `60s` | 鉴权通过但未真正推流的绑定保留时长 |
+| `MEDIAMTX_APP` | `live` | 推流 app 名（RTMP 地址里的 `/live`） |
+| `MEDIAMTX_API_URL` | `http://127.0.0.1:9997` | 路径状态 API |
+| `MEDIAMTX_AUTH_SECRET` | 空 | 回调共享密钥，需与 mediamtx.yml 的 `?secret=` 一致 |
+| `MEDIAMTX_AUTH_ALLOWED_CIDRS` | 本机 + 内网 | 允许回调的来源网段 |
+| `MEDIAMTX_HLS_PROXY_TARGET` | `http://127.0.0.1:8888` | `/hls/` 上游 |
+| `MEDIAMTX_WHEP_PROXY_TARGET` | `http://127.0.0.1:8889` | `/rtc/` 上游 |
+| `MEDIAMTX_RTMP_PUBLIC_BASE` | `rtmp://localhost:1935/live` | 展示给主播的服务器地址 |
+| `CORS_ALLOWED_ORIGINS` | 空 | 前后端分离时才需要 |
 
-后端支持用配置文件代替环境变量，方便 Windows 与系统服务部署：
-
-```bash
-tinycast -config tinycast.env   # KEY=VALUE，已存在的环境变量优先
-tinycast -version               # 打印版本与提交号
-```
+时长支持 `90s`、`5m`、`2m30s` 或纯秒数 `300`。
 
 ## 本地开发
 
 ```bash
-source scripts/dev-env.sh     # 仅在 $HOME 不可写、需要仓库内工具链时使用
-./scripts/dev.sh              # 后端 :8080 + Vite :5173（/api、/rtc 已代理到后端）
-go test -race ./...           # 后端测试
-cd web && pnpm test           # 前端单元测试（vitest + happy-dom）
-cd web && pnpm build          # 前端生产构建，产物进入 internal/webui/dist
+source scripts/dev-env.sh          # 把工具链指到仓库内的 .tools
+./scripts/dev.sh                   # 同时启动 go run 与 pnpm dev
+
+# 单独跑
+go run ./cmd/tinycast -open        # 后端 :8080，-open 自动开浏览器
+cd web && pnpm dev                 # 前端 :5173，代理 /api 与 /rtc 到后端
+
+# MediaMTX（本地验证推流链路）
+.tools/mtx/mediamtx .tools/mtx/mtx-e2e.yml
 ```
 
-如果机器的 `$HOME` 不可写（例如受限的容器环境），在仓库根与 `web/` 各放一份 `.npmrc` 指定本地缓存目录即可，例如：
-
-```ini
-store-dir=./.tools/pnpm-store
-cache-dir=./.tools/npm-cache
-```
-
-没有 SRS 时也可以用 curl 模拟回调调试：
+测试：
 
 ```bash
-curl -X POST http://127.0.0.1:8080/internal/srs/on_publish \
-  -H 'Content-Type: application/json' \
-  -d '{"client_id":"p1","app":"live","stream":"alex","param":"?room=room1&token=<你的令牌>"}'
-curl -X POST http://127.0.0.1:8080/internal/srs/on_play \
-  -H 'Content-Type: application/json' \
-  -d '{"client_id":"v1","app":"live","stream":"alex"}'
+go test -race ./...                # 后端
+go vet ./... && gofmt -l ./cmd ./internal
+cd web && pnpm test                # 前端（vitest）
 ```
 
-更省事的方式是用 [cmd/tinysim](cmd/tinysim)（仅开发用，不进生产包，构建产物在 `bin/dev/`）：它把 SRS 会发的回调手工发一遍，不参与业务逻辑。
+## 目录结构
 
-```bash
-go run ./cmd/tinysim demo -step 0            # 推流 → 重复推流被拒 → 观众进出 → 断流保留 → 重新推流
-go run ./cmd/tinysim token -user alex        # 打印一份可直接粘贴到 OBS 的推流配置
 ```
-
-| 子命令 | 作用 |
-| --- | --- |
-| `demo` | 完整走一遍生命周期（默认每步停留 4s，`-step 0` 关闭等待） |
-| `publish` / `unpublish` | 模拟 OBS 开始 / 停止推流 |
-| `play` / `stop` | 模拟一个观众进入 / 离开 |
-| `state` | 查询房间当前状态 |
-| `token` | 打印一份可直接粘贴到 OBS 的推流配置 |
-
-常用参数：`-base http://127.0.0.1:8080`、`-user alex`、`-room 演示直播间`、`-token <令牌>`、`-secret <回调密钥>`、`-client <客户端ID>`。这种方式没有媒体流，播放器会显示连接失败，属预期现象。
+cmd/tinycast/            入口：配置、日志、HTTP 服务、-open
+internal/config/         环境变量与 .env 解析
+internal/hub/            内存状态：身份绑定、房间、观看者、SSE 订阅
+internal/monitor/        巡检循环：轮询 MediaMTX、推进房间状态、回收超时
+internal/mtx/            MediaMTX API 客户端（paths、query 解析）
+internal/httpapi/        REST、SSE、鉴权回调、HLS/WHEP 反向代理
+internal/webui/          go:embed 内嵌前端
+web/                     Vue 3 + TS + Vite 前端
+deploy/mediamtx/         MediaMTX 配置（宿主机 / compose 两份）
+deploy/systemd/          mediamtx.service、tinycast.service、env 样例
+deploy/windows/          Windows 启动脚本与说明
+scripts/                 构建、开发、打包脚本
+```
 
 ## 设计取舍
 
-- **内存状态**：单实例、无数据库；进程重启即丢失全部房间与人数（可接受）
-- **令牌哈希**：内存只保存 SHA-256(token)，任何接口都不回显明文或哈希
-- **并发安全**：单一 sync.RWMutex 保护全部状态；同身份校验与占用在同一把写锁内完成原子性
-- **SSE 全量快照**：每次推送完整房间列表（30ms 合并窗口），前端不做增量合并，逻辑简单且不易错位
-- **观看会话按 SRS client_id 索引**：on_stop 只带 client_id 也能精确回收，重复回调幂等
-- **回调来源限制**：默认只信任回环与私网，另可用共享密钥加固；/internal/* 不应暴露到公网
+- **内存存储**：不引入数据库，进程重启状态清空。轻量优先，符合“单实例 + 可接受丢失”的定位。
+- **鉴权放在回调里**：MediaMTX 只在推流开始时问一次后端，绑定关系与“是否已有一路推流”的判断在同一把锁内完成。
+- **状态靠轮询**：没有 unpublish 回调可用，用 1 秒轮询换简单与可靠；MediaMTX 短暂故障不清空房间。
+- **人数靠心跳**：HLS 会话按请求创建、数量不可靠，因此用稳定 `viewerId` + 心跳，两种通道统一计数。
+- **媒体反代**：浏览器只和 8080 同源交互，HLS/WebRTC 信令由 Go 转发，避免跨域与额外暴露端口。
+- **令牌哈希**：服务端只存 SHA-256，房间列表与日志都不出现明文。
 
 ## 故障排查
 
 | 现象 | 排查方向 |
 | --- | --- |
-| OBS 提示推流失败 | 看 Go 日志中的 reason 字段：username_bound_to_other_token / token_bound_to_other_username / already_publishing 等；确认 5 分钟保留期是否已释放 |
-| 房间列表没有房间 | 只有 on_publish 放行后才会创建房间；检查 srs.conf 的 http_hooks 地址与端口 |
-| 页面能打开但一直黑屏 | 见下方「画面黑屏怎么排查」 |
-| 房间旁提示"推流码异常" | 推流码里的房间名被手改过或未编码，SRS 无法解析查询串；重新复制页面生成的推流码 |
-| 在线人数不准 | 确认 SRS 已开启 on_play / on_stop 回调；异常断开由定时任务核对 SRS 客户端列表兜底，可配置 SRS_CLIENTS_API_URL |
-| 播放 404 / CORS 报错 | 同源部署时配置 SRS_RTC_PROXY_TARGET=http://127.0.0.1:1985，由后端反代 /rtc/* |
-
-### 画面黑屏怎么排查
-
-SRS 6 的 `rtmp_to_rtc` **只做封装转换，不做视频转码**，浏览器能放的只有 H.264。所以"连接成功但没有画面"绝大多数是编码或 UDP 通路问题，按下面顺序看：
-
-1. **OBS 是否用了 H.265 / HEVC**：SDP 照常协商成功，SRS 却一个视频包都不发，页面于是静默黑屏。后端会通过 SRS 的 `/api/v1/streams/` 读到实际编码，页面直接显示"主播使用 H.265 推流，浏览器无法解码"。
-2. **H.264 的档次是否超前**：4:4:4、4:2:2、10bit（High 4:4:4 Predictive / High 10）浏览器同样解不了，要在 OBS 里改回 High/Main + 4:2:0 8bit。
-3. **UDP 8000 是否放通**：防火墙、云安全组、Docker 的 `8000-udp` 端口映射缺一不可；HTTPS 页面配 HTTP 的 WHEP 地址会被混合内容策略拦截。
-4. **candidate 是否可达**：默认 `candidate *` 由 SRS 自动探测网卡地址，本机与局域网都能连；云主机在 NAT 后面时要写公网 IP/域名，否则浏览器只会拿到内网候选地址。
-5. **用播放器的 🩺 诊断面板确认**：可展开看 ICE 状态、已解码帧数、分辨率与码率。帧数一直为 0 说明是上面 1~4 之一；帧数在涨却仍然黑屏，通常是浏览器硬件解码或截图工具的问题。
-6. **推流码里的房间名是否手改过**：SRS 解析不了含未编码中文的查询串（`Ignore parse url=... err code=3007(HttpParseUrl)`），会把查询串并进流名，播放端按干净名字请求永远拿不到媒体。这类房间会带 `warning=stream_unparsed`，页面顶部与房间卡片都会给出提示，让主播重新复制推流码即可。
-
-页面上的提示来自后端的 `media` 字段（`videoCodec`/`videoProfile`/`width`/`height` 等）与播放器 `getStats()` 的实时统计，后者在连续 6 秒收不到任何视频帧时触发，不必等页面报错。
-
-### H.265 推流能不能播
-
-不能，这是浏览器与 SRS 的能力边界，不是配置问题：
-
-- SRS 6 的 `rtmp_to_rtc` 只换封装不转码，H.265 在 RTP 里仍是 H.265；
-- Chrome / Edge / Firefox / Safari 的 WebRTC 接收端都不支持 HEVC（`RTCRtpReceiver` 只协商 H.264 / VP8 / VP9 / AV1），WHEP 应答里只有 H.264 的 `a=rtpmap`；
-- 两者一叠加的结果就是：信令 201、ICE 与 DTLS 全部完成、`connectionState=connected`，但视频 RTP 一个包都不来（音频照常），页面表现为静默黑屏。本仓库用真实 SRS 6.0.195 + ffmpeg 推 H.265 复现过：8 秒内 video 0 包、audio 393 包。
-
-三条可选路径：
-
-1. **OBS 改回 H.264（推荐）**：设置 → 输出 → 推流编码器选 x264 或 NVENC/QSV 的 H.264，档次用 High/Main、4:2:0 8bit。
-2. **服务端转码**：在 SRS 的 `vhost` 里开 `transcode`，用 ffmpeg 把 `alex` 转成 `alex_h264` 再让页面播后者。画质与延迟都会打折，CPU 成本约每路 720p 一个核，本平台默认不开启。
-3. **换传输协议**：HLS/LL-HLS 的 fMP4 里可以带 HEVC，浏览器只要有硬解能力就能播（Safari、部分 Edge/Chrome），代价是延迟从亚秒级升到数秒，与"低延迟直播"的定位不符。
-
-页面已经会在这种情况下直接说明原因：后端从 SRS 的 `/api/v1/streams/` 读到 `HEVC` 后，房间详情页会显示"主播正在用 H.265（HEVC）推流，绝大多数浏览器无法播放"。
+| 首页没有房间 | 看日志有无“推流鉴权通过”；没有就是推流码不对，有则是媒体未 ready（看 `/v3/paths/list`） |
+| OBS 提示连接失败 | 1935 是否放通；推流码是否整段复制；同一身份是否已在推流 |
+| 房间在但画面黑 | 🩺 面板看下载速率与帧率；H.265 在 Linux 浏览器需换 H.264；局域网看 UDP 8000 |
+| 低延迟通道没声音 | 正常现象，MediaMTX 不转码，改用 HLS 通道 |
+| 人数一直是 0 | 播放器心跳失败：看 `/api/rooms/{u}/watch` 是否 4xx，`VIEWER_TIMEOUT` 是否设得太小 |
+| 断流后房间不消失 | 日志有无“保留期结束，已释放房间”；`ROOM_GRACE` 是否被改大 |
+| 启动报 `mediamtx_unreachable` | `MEDIAMTX_*_PROXY_TARGET` 指向的端口没起，或 MediaMTX 未启动 |
 
 ## 许可
 
-见 [LICENSE](./LICENSE)。
+MIT，见 [LICENSE](LICENSE)。

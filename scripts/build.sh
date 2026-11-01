@@ -2,20 +2,20 @@
 # 构建 TinyCast：先构建前端（产物进入 internal/webui/dist 并被 go:embed 内嵌），再构建 Go 二进制。
 #
 # 用法：
-#   ./scripts/build.sh                       # 构建本机平台到 bin/
-#   ./scripts/build.sh --windows             # 交叉编译 Windows 生产运行包到 bin/windows-amd64/
+#   ./scripts/build.sh                          # 构建本机平台到 bin/
+#   ./scripts/build.sh --windows                # 交叉编译 Windows 运行包到 bin/windows-amd64/
 #   GOOS=linux GOARCH=arm64 ./scripts/build.sh  # 其它平台交叉编译
-#   SKIP_WEB=1 ./scripts/build.sh            # 只构建后端（前端产物已存在时）
+#   SKIP_WEB=1 ./scripts/build.sh               # 只构建后端（前端产物已存在时）
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 for arg in "$@"; do
   case "$arg" in
     --windows) export GOOS=windows GOARCH=amd64 ;;
     -h | --help)
-      sed -n '2,8p' "${BASH_SOURCE[0]}"
+      sed -n '2,9p' "$0"
       exit 0
       ;;
     *)
@@ -49,7 +49,7 @@ if [[ "${GOOS:-}" == "windows" ]]; then
   SUFFIX=".exe"
   OUTDIR="bin/windows-amd64"
   mkdir -p "$OUTDIR"
-  # 清掉上一次生成的顶层文件；srs/ 与 logs/ 原样保留，避免重复下载 42MB 的 SRS
+  # 清掉上一次生成的顶层文件；mediamtx/ 与 logs/ 原样保留，避免重复下载 30MB 的 MediaMTX
   rm -f "$OUTDIR"/*.exe "$OUTDIR"/*.cmd "$OUTDIR"/*.txt "$OUTDIR"/*.env
 fi
 
@@ -57,24 +57,14 @@ echo "==> 构建后端 ${GOOS:-本机}/${GOARCH:-本机}"
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinycast$SUFFIX" ./cmd/tinycast
 
 if [[ "$OUTDIR" == "bin/windows-amd64" ]]; then
-  # Windows 生产运行包：可执行文件 + 配置文件 + 启动脚本 + 说明，SRS 由 fetch-srs-windows.sh 放入 srs/
+  # Windows 运行包：tinycast.exe + MediaMTX（需先跑 fetch-mediamtx-windows.sh）+ 启动脚本 + 说明
   cp deploy/windows/tinycast.env deploy/windows/start.cmd deploy/windows/start-all.cmd \
     deploy/windows/open-firewall.cmd deploy/windows/部署说明.txt "$OUTDIR/"
-  mkdir -p "$OUTDIR/logs" "$OUTDIR/srs/conf"
-  if [[ -f deploy/srs/srs.windows.conf ]]; then
-    cp deploy/srs/srs.windows.conf "$OUTDIR/srs/conf/srs.conf"
+  mkdir -p "$OUTDIR/logs" "$OUTDIR/mediamtx"
+  cp deploy/mediamtx/mediamtx.yml "$OUTDIR/mediamtx/mediamtx.yml"
+  if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
+    echo "提示：尚未放入 MediaMTX，运行 ./scripts/fetch-mediamtx-windows.sh 之后才可做真实推流"
   fi
-  if [[ ! -f "$OUTDIR/srs/objs/srs.exe" ]]; then
-    echo "提示：尚未放入 SRS，运行 ./scripts/fetch-srs-windows.sh 之后才可做真实推流"
-  fi
-
-  # 模拟回调的联调工具不进生产包，单独放在 bin/dev 下备用
-  echo "==> 构建联调工具 tinysim"
-  mkdir -p bin/dev
-  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "bin/dev/tinysim$SUFFIX" ./cmd/tinysim
-else
-  echo "==> 构建联调工具 tinysim"
-  CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinysim$SUFFIX" ./cmd/tinysim
 fi
 
 echo "==> 完成：$OUTDIR"

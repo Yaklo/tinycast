@@ -78,11 +78,11 @@ func TestLoadEnvFileMissing(t *testing.T) {
 
 func TestLoadEnvFileAppliesToLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tinycast.env")
-	content := "HTTP_ADDR=:7070\nROOM_GRACE=3m\nSRS_RTMP_PUBLIC_BASE=rtmp://live.example.com/live\n"
+	content := "HTTP_ADDR=:7070\nROOM_GRACE=3m\nMEDIAMTX_RTMP_PUBLIC_BASE=rtmp://live.example.com/live\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"HTTP_ADDR", "ROOM_GRACE", "SRS_RTMP_PUBLIC_BASE", "JANITOR_INTERVAL"} {
+	for _, k := range []string{"HTTP_ADDR", "ROOM_GRACE", "MEDIAMTX_RTMP_PUBLIC_BASE", "MONITOR_INTERVAL"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -97,7 +97,7 @@ func TestLoadEnvFileAppliesToLoad(t *testing.T) {
 	if cfg.HTTPAddr != ":7070" || cfg.RoomGrace.String() != "3m0s" {
 		t.Fatalf("配置未生效：addr=%s grace=%s", cfg.HTTPAddr, cfg.RoomGrace)
 	}
-	if cfg.SRS.RTMPPublicBase != "rtmp://live.example.com/live" {
-		t.Fatalf("RTMP 地址未生效：%s", cfg.SRS.RTMPPublicBase)
+	if cfg.MediaMTX.RTMPPublicBase != "rtmp://live.example.com/live" {
+		t.Fatalf("RTMP 地址未生效：%s", cfg.MediaMTX.RTMPPublicBase)
 	}
 }

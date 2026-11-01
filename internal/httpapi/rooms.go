@@ -26,7 +26,6 @@ func (s *Server) handleRooms(w http.ResponseWriter, _ *http.Request) {
 
 type roomResponse struct {
 	Room         hub.RoomView `json:"room"`
-	Media        *mediaInfo   `json:"media,omitempty"`
 	ServerTime   int64        `json:"serverTime"`
 	GraceSeconds int          `json:"graceSeconds"`
 }
@@ -40,7 +39,6 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, roomResponse{
 		Room:         view,
-		Media:        s.media(r.Context(), view.Username),
 		ServerTime:   time.Now().UnixMilli(),
 		GraceSeconds: s.graceSeconds(),
 	})
@@ -48,21 +46,22 @@ func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 
 // playback 描述浏览器播放一路直播所需的全部信息。
 type playback struct {
+	// Protocol 是推荐协议：配置了 HLS 代理时为 hls（有声音、兼容 H.265），否则为 webrtc。
 	Protocol string `json:"protocol"`
-	// WhepURL 是 SRS 的 WHEP 信令地址，前端 POST 一段 SDP offer 即可换回 answer。
-	WhepURL string `json:"whepUrl"`
-	// StreamURL 是 SRS 惯用的 webrtc:// 地址，用于展示与排障。
-	StreamURL string `json:"streamUrl"`
+	// HLSURL 是 HLS 播放列表地址（m3u8），前端用 hls.js 或原生播放器播放。
+	HLSURL string `json:"hlsUrl,omitempty"`
+	// WhepURL 是 WHEP 信令地址，前端 POST 一段 SDP offer 即可换回 answer。
+	WhepURL string `json:"whepUrl,omitempty"`
 }
 
 type playResponse struct {
-	Username     string     `json:"username"`
-	State        hub.State  `json:"state"`
-	GraceUntil   int64      `json:"graceUntil,omitempty"`
-	Playback     *playback  `json:"playback"`
-	Media        *mediaInfo `json:"media,omitempty"`
-	ServerTime   int64      `json:"serverTime"`
-	GraceSeconds int        `json:"graceSeconds"`
+	Username     string         `json:"username"`
+	State        hub.State      `json:"state"`
+	GraceUntil   int64          `json:"graceUntil,omitempty"`
+	Playback     *playback      `json:"playback,omitempty"`
+	Media        *hub.MediaInfo `json:"media,omitempty"`
+	ServerTime   int64          `json:"serverTime"`
+	GraceSeconds int            `json:"graceSeconds"`
 }
 
 // handlePlay 返回播放信息；GRACE 状态下不会给出播放地址，避免前端播放"假直播"。
@@ -77,16 +76,12 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	resp := playResponse{
 		Username:     view.Username,
 		State:        view.State,
+		Media:        view.Media,
 		ServerTime:   time.Now().UnixMilli(),
 		GraceSeconds: s.graceSeconds(),
 	}
 	if view.State == hub.StateLive {
-		resp.Media = s.media(r.Context(), view.Username)
-		resp.Playback = &playback{
-			Protocol:  "webrtc",
-			WhepURL:   s.whepURL(view.Username),
-			StreamURL: s.streamURL(view.Username),
-		}
+		resp.Playback = s.playbackFor(view.Username)
 	} else {
 		resp.GraceUntil = view.GraceUntil
 	}
@@ -96,17 +91,27 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) graceSeconds() int { return int(s.cfg.RoomGrace / time.Second) }
 
-// whepURL 拼装浏览器使用的 WHEP 信令地址。
+// playbackFor 拼装播放地址。
 //
-// 默认返回相对地址（由浏览器按当前 origin 解析），这样部署时只要把 /rtc/ 转发给 SRS
-// 就能保持同源；SRS_RTC_PUBLIC_BASE 非空时则指向独立的 SRS 地址。
-func (s *Server) whepURL(username string) string {
-	q := url.Values{}
-	q.Set("app", s.cfg.SRS.App)
-	q.Set("stream", username)
-	return strings.TrimRight(s.cfg.SRS.RTCPublicBase, "/") + "/rtc/v1/whep/?" + q.Encode()
-}
+// 默认返回相对地址（浏览器按当前 origin 解析）：部署时前端与后端同源，
+// 后端再把 /rtc/ 与 /hls/ 转发给 MediaMTX，因此不需要额外的跨域配置。
+func (s *Server) playbackFor(username string) *playback {
+	stream := url.PathEscape(username)
+	out := &playback{}
 
-func (s *Server) streamURL(username string) string {
-	return strings.TrimRight(s.cfg.SRS.WebRTCPublicBase, "/") + "/" + url.PathEscape(username)
+	if s.hls != nil {
+		out.Protocol = "hls"
+		out.HLSURL = "/hls/" + s.cfg.MediaMTX.App + "/" + stream + "/index.m3u8"
+	}
+	if s.whep != nil {
+		if out.Protocol == "" {
+			out.Protocol = "webrtc"
+		}
+		out.WhepURL = "/rtc/" + s.cfg.MediaMTX.App + "/" + stream + "/whep"
+	}
+	if out.Protocol == "" {
+		// 两个上游都没配置时依然返回结构体，前端据此显示"未启用播放"的提示。
+		out.Protocol = "none"
+	}
+	return out
 }

@@ -1,119 +1,128 @@
-轻量级直播推流平台 TinyCast —— Windows 生产运行包
-=====================================================
+TinyCast Windows 运行包使用说明
+======================================================================
 
-一、目录说明
-  tinycast.exe        业务后端（Vue 前端已内嵌，单文件即可运行）
-  tinycast.env        全部运行配置（KEY=VALUE，逐项都有注释）
-  start-all.cmd       启动 SRS + TinyCast（生产环境用这个）
-  start.cmd           只启动 TinyCast（SRS 已在别处运行时用）
-  open-firewall.cmd   放通端口用（右键"以管理员身份运行"，只需跑一次）
-  srs\objs\srs.exe    SRS 6.0.172 官方 Windows 构建
-  srs\objs\*.dll     SRS 依赖的 Cygwin 运行库（5 个），必须与 srs.exe 同目录：
-                      cygwin1.dll、cyggcc_s-seh-1.dll、cygstdc++-6.dll、
-                      cygiconv-2.dll、cygintl-8.dll
-                      官方安装包只带前三个，缺后两个时 srs.exe 启动会报
-                      「由于找不到 cygiconv-2.dll，无法继续执行代码」，本包已补齐
-  srs\conf\srs.conf  SRS 配置（四个回调指向 http://127.0.0.1:8080/internal/srs/*）
-  srs\logs\srs.log   SRS 运行日志（由启动脚本重定向生成）
-  logs\tinycast.log  TinyCast 日志（默认 16MB 滚动，保留 3 份）
+一、这个包是什么
 
-二、首次运行（本机自测）
-  1. 双击 start-all.cmd。会看到两个窗口：
-       「TinyCast - SRS 6」：媒体服务器（1935/tcp、1985/tcp、8000/udp）
-       当前窗口：TinyCast 后端，浏览器随后自动打开 http://127.0.0.1:8080/
-  2. 首页点「创建推流配置」，填用户名（例如 alex）和房间名称，复制生成的推流码。
-     令牌由浏览器用 crypto.getRandomValues() 生成，不会上传到服务器，请自行保存。
-  3. OBS → 设置 → 直播 → 服务选「自定义」：
+  一个不用安装任何环境的直播服务：解压后双击就能跑。
+    - MediaMTX：负责收 RTMP 流、给浏览器分发 HLS / WebRTC；
+    - tinycast.exe：负责推流鉴权、房间状态、在线人数、网页。
+  不需要数据库，不需要 Docker、Node.js 或 Visual Studio。
+  关掉窗口后所有房间状态就没了，这是刻意保持的轻量设计。
+
+
+二、目录结构
+
+  tinycast.exe            业务后端（网页也打包在里面）
+  tinycast.env            配置，改完要重启 TinyCast 生效
+  start-all.cmd           一键启动 MediaMTX + TinyCast（推荐）
+  start.cmd               只启动 TinyCast（MediaMTX 已单独在跑时用）
+  open-firewall.cmd       放通端口，需要管理员权限
+  mediamtx\mediamtx.exe   MediaMTX 主程序
+  mediamtx\mediamtx.yml   MediaMTX 配置（推流鉴权回调写在这里）
+  logs\                   运行日志，出问题时先看这里
+
+
+三、第一次使用
+
+  1. 把整个文件夹解压到本地磁盘（不要放在压缩包里直接运行）。
+  2. 右键 open-firewall.cmd → 以管理员身份运行，放通端口（只需一次）。
+  3. 双击 start-all.cmd。会弹出两个窗口：
+       TinyCast - MediaMTX   媒体服务，关掉它就断流；
+       TinyCast 控制台       业务后端，按 Ctrl+C 停止。
+  4. 浏览器会自动打开 http://127.0.0.1:8080 。
+  5. 点首页的“创建推流配置”，填用户名（3~32 位字母、数字、下划线、减号）
+     和房间名称，点生成。
+  6. 把生成结果里的“服务器”和“推流码”分别粘进 OBS：
+       设置 → 直播 → 服务选“自定义”
        服务器：rtmp://127.0.0.1:1935/live
-       推流码：alex?room=房间名称&token=生成的令牌
-     然后点「开始推流」。
-  4. 首页立刻出现该房间（状态 LIVE），点进去就能看到 WebRTC 画面，并显示在线观看人数。
-      播放器右下角按钮：🩺 播放统计（编码/分辨率/帧率/码率/丢包/抖动/缓冲/RTT，含最近
-      60 秒下载速率曲线）、静音、网页全屏、全屏、画中画；双击画面也可直接全屏或退出，
-      网页全屏按 Esc 退出。
-     注意：推流码请整段复制，不要手改房间名。房间名里的中文在推流码中是双重编码的
-     （OBS 会先自己解码一次），手改会让 SRS 解析失败，观众端只会看到黑屏。
-  5. OBS 点「停止推流」→ 房间变「断流保留中」并开始 5 分钟倒计时；
-     5 分钟内用同一用户名和令牌重推会恢复 LIVE，超时后房间自动释放并从首页消失。
+       推流码：整段复制，不要手改（房间名带空格或中文时尤其要注意）
+  7. OBS 点“开始直播”，首页立刻出现房间；点进房间就能看画面。
 
-三、改为局域网 / 公网访问
-  1. srs\conf\srs.conf 中 rtc_server 的 candidate：
-       默认 candidate *; 由 SRS 自动探测本机网卡地址，本机与局域网内手机/其它电脑
-       都能直接观看，一般不用改。
-       服务器在 NAT 后面（云主机、家用路由器）时改成公网可达的地址：
-       candidate 1.2.3.4;                 公网 IP
-       candidate live.example.com;        域名（需公网可解析）
-  2. tinycast.env 中把对外地址填上：
-       SRS_RTMP_PUBLIC_BASE=rtmp://<对外地址>:1935/live
-       SRS_WEBRTC_PUBLIC_BASE=webrtc://<对外地址>:1935/live
-       PUBLIC_BASE_URL=https://<对外地址>          （启用 HTTPS 时填写）
-  3. Windows 防火墙放通：右键 open-firewall.cmd →「以管理员身份运行」（可重复执行）。
-       手工放通的端口是：
-       TCP 1935   OBS 推流（RTMP）
-       TCP 8080   页面与接口（若用 80/443 反代则放通对应端口）
-       TCP 1985   SRS HTTP API（仅内网诊断用，可不放通）
-       UDP 8000   WebRTC 媒体，浏览器观看必需（漏了就是"能进房间但画面黑"）
-  4. 生产建议在前面加 Caddy / Nginx 做 HTTPS 反向代理到 127.0.0.1:8080。
-     注意：反代必须拒绝 /internal/ 路径（那是 SRS 回调），否则任何人只要伪造 POST
-     就能创建房间；不放心的话再设置 SRS_CALLBACK_SECRET，并同步修改
-     srs\conf\srs.conf 中四个回调地址加上 ?secret=<同一个值>。
+  推流码形如  alex?room=%E6%B5%8B%E8%AF%95&token=MPA49Px...
+  其中 alex 是用户名，room 是房间名，token 是随机令牌。
+  用户名和令牌一一绑定：原连接断开后 5 分钟内可以用同样的用户名+令牌重新推流，
+  但同一时刻只能有一路；换用户名必须换令牌，否则会被拒绝。
 
-四、配置文件说明（tinycast.env）
-  常用项：
-    HTTP_ADDR              监听地址，默认 :8080
-    PUBLIC_BASE_URL        对外地址，用于拼装返回给浏览器的绝对地址
-    LOG_LEVEL/LOG_FILE     info、logs\tinycast.log（按 LOG_MAX_MB 滚动，保留 LOG_KEEP 份）
-    ROOM_GRACE             断流保留时长，需求固定为 5m
-    JANITOR_INTERVAL       清理任务间隔，默认 15s
-    SRS_APP                SRS 应用名（RTMP 地址里的 /live 段）
-    SRS_RTMP_PUBLIC_BASE   展示给 OBS 的服务器地址
-    SRS_RTC_PROXY_TARGET   后端把 /rtc/* 反代到 SRS 的 HTTP API
-    SRS_CLIENTS_API_URL    定时向 SRS 核对在线客户端，修复丢失的回调
-    SRS_CALLBACK_ALLOWED_CIDRS  允许发起回调的来源网段（公网 IP 一律拒绝）
-  命令行参数优先于文件，例如：
-    tinycast.exe -config tinycast.env -addr :9000
-    tinycast.exe -version        查看版本
 
-五、长期运行
-  - 本程序是控制台程序：Ctrl+C 或关闭窗口即停止服务，退出时会优雅关闭，
-    所有房间与身份绑定都随内存清空，这是本项目的设计取舍。
-  - 需要开机自启 / 崩溃重启时，用「任务计划程序」把 start-all.cmd 设为登录或开机触发，
-    或用 NSSM / WinSW 之类的工具把 tinycast.exe 注册成 Windows 服务。
-  - 两个窗口可以分别关闭：关掉 SRS 窗口只会断流（房间进入 5 分钟保留期）。
+四、端口
 
-六、排查
-  - 启动 srs.exe 弹窗「由于找不到 cygiconv-2.dll / cygintl-8.dll」：objs 目录里少了文件，
-    确认 srs\objs 下 5 个 DLL 都在；直接从压缩包里解压整目录，不要只拷 srs.exe。
-  - 首页没有房间：先看 logs\tinycast.log 有没有「推流开始」；OBS 侧连不上就看 srs\logs\srs.log。
-  - OBS 推流被拒（StConnect 失败）：同一用户名+令牌已有一路推流，或令牌与他人用户名冲突；
-    换一份配置，或等原身份 5 分钟释放后再推。
-  - 能进房间但画面黑：按顺序看下面五条，页面上的提示会直接指出属于哪一条。
-      ① OBS 用 H.265(HEVC) 推流：SRS 的 rtmp_to_rtc 不做转码，浏览器只协商 H.264，
-         于是连接"成功"但一个视频包都收不到。OBS → 设置 → 输出 → 直播：
-         编码器选 x264 或 NVENC/QuickSync 的 H.264，关键帧间隔 2 秒。
-          这是浏览器与 SRS 的能力边界，改配置解决不了；若必须用 H.265，只能在 SRS 侧开启
-          transcode 转出 H.264 副本再播（每路 720p 约一个 CPU 核，本包默认不开）。
-         页面会显示"主播使用 H.265 推流，浏览器无法解码"。
-      ② 编码档次不支持：H.264 的 4:4:4 或 10bit（High 4:4:4 Predictive / High 10）
-         浏览器同样放不了，改成 profile High/Main + 4:2:0 8bit。
-      ③ UDP 8000 被拦：防火墙、云安全组、或 candidate 指向了浏览器到不了的地址
-         （例如默认的 127.0.0.1，却用手机访问）。先跑 open-firewall.cmd，
-         再把 candidate 改成 * 或对外 IP。
-      ④ 播放器左下角「🩺 诊断」可展开看 ICE 状态、已解码帧数、分辨率与码率：
-         帧数一直是 0 就是①②③之一；帧数在涨但画面黑多为浏览器硬件解码问题。
-      ⑤ 推流码被手改过：SRS 解析不了带未编码中文的查询串（日志里是
-         Ignore parse url=... err code=3007(HttpParseUrl)），会把查询串并进流名，
-         于是播放端按干净名字永远拿不到画面。这类房间会显示「推流码异常」，
-         回到首页重新复制一份推流码即可（房间名不必改，直接复制就好）。
-  - 人数一直是 0：确认 srs\conf\srs.conf 的 http_hooks 指向 127.0.0.1:8080，且 TinyCast 已启动。
-  - 想确认链路是否通：curl http://127.0.0.1:8080/api/healthz 与
-    curl http://127.0.0.1:1985/api/v1/versions 都应返回 JSON。
+  TCP 1935   OBS 推流（RTMP）
+  TCP 8080   网页、接口，以及 /hls/ 与 /rtc/ 的反向代理
+  UDP 8000   WebRTC 媒体通道（“低延迟”模式必需）
+  TCP 9997   MediaMTX 管理接口，只监听 127.0.0.1，不对外
 
-七、版本与来源
-  tinycast.exe -version 可查看构建版本与提交号。
-  SRS 侧为 6.0.172，取自 ossrs/srs 的 Release v6.0-b0 Windows 安装包（sha256 见仓库
-  scripts/fetch-srs-windows.sh）；SRS 官方把 Windows 版定位为测试用途，
-  真正的生产部署建议用 Linux 版 SRS，配置见仓库 deploy/srs/srs.conf。
-  官方包缺失的 cygiconv-2.dll、cygintl-8.dll 取自 Cygwin x86_64 官方软件源
-  （libiconv2-1.17-1、libintl8-0.22.5-1），sha256 同样固化在 fetch-srs-windows.sh 中，
-  取的是与包内 cygwin1.dll 同时期的版本，避免运行库 ABI 不匹配。
+  只在本机自己看，可以不放通任何端口。
+  局域网或公网观看时，TCP 1935 / TCP 8080 / UDP 8000 都要放通。
+
+
+五、局域网或公网观看
+
+  1. mediamtx\mediamtx.yml 里把 webrtcAdditionalHosts 改成这台机器的 IP 或域名：
+       webrtcAdditionalHosts: [192.168.1.10]
+     （只在本机测试时保持 [127.0.0.1] 即可。）
+  2. tinycast.env 里把推流地址改成同一台机器的地址：
+       MEDIAMTX_RTMP_PUBLIC_BASE=rtmp://192.168.1.10:1935/live
+  3. 重启 start-all.cmd，用 http://192.168.1.10:8080 打开页面。
+
+  正式对外时请在前面加一层 HTTPS 反向代理（Caddy / Nginx），
+  并把 PUBLIC_BASE_URL 填成 https://你的域名 。
+
+
+六、播放方式与编码
+
+  播放器有两个通道，右上角可以切换：
+
+    默认 HLS        有声音，支持 H.264 / H.265 / AV1，延迟约 1 秒；
+    低延迟 WebRTC   延迟约 0.3 秒，但 MediaMTX 不做转码，
+                    浏览器拿不到 AAC 音轨，只有画面没有声音。
+
+  编码建议：
+    - 想要“有声音 + 各平台都能看”，用 H.264 推流，走默认 HLS 通道；
+    - 想要最低延迟，用 H.264 或 H.265 都可以，切到 WebRTC 通道；
+    - H.265 在 Chrome / Edge（Windows、macOS）与 Safari 上能通过 HLS 播放，
+      Linux 下的 Chrome 与 Firefox 通常解不了，页面会给出提示。
+
+  播放器右上角的 🩺 按钮会显示当前下载速率、帧率、缓冲延迟、丢包等实时数据。
+  画面异常时先看这里：下载速率为 0 说明媒体没到，帧率为 0 说明解码没开始。
+
+
+七、出问题怎么查
+
+  ① 首页点了房间，画面一直转圈
+     先看 logs\tinycast.log 有没有“推流鉴权通过”和“推流开始”。
+     没有“推流鉴权通过”= 推流码不对（令牌不匹配、用户名已被别的令牌占用）。
+     有“推流开始”但画面不动 = 浏览器与媒体之间不通，检查：
+       - 局域网观看时 UDP 8000 是否放通；
+       - mediamtx.yml 的 webrtcAdditionalHosts 是否写成了这台机器的 IP；
+       - 是不是 H.265 却在 Linux 浏览器上用 HLS 通道播放。
+
+  ② OBS 提示连接失败或被拒绝
+     - 推流码是否整段复制（形如 username?room=...&token=...）；
+     - 同一用户名+令牌是否已在别处推流（日志里会写“已有相同身份推流”）；
+     - 换过用户名却复用了旧令牌，也会被拒绝（用户名与令牌一一绑定）。
+
+  ③ 端口被占用（窗口一闪而过 / 日志里 bind 失败）
+     - 1935 被别的流媒体软件占用：关掉它，或改 mediamtx.yml 的 rtmpAddress，
+       并同步改 tinycast.env 的 MEDIAMTX_RTMP_PUBLIC_BASE；
+     - 8080 被占用：改 tinycast.env 的 HTTP_ADDR，同时改 mediamtx.yml 里
+       authHTTPAddress 的端口。
+
+  ④ 想确认 MediaMTX 收到了流
+     浏览器打开 http://127.0.0.1:9997/v3/paths/list （只在本机可用），
+     能看到 live/用户名 且 ready 为 true，说明媒体侧没问题。
+
+  ⑤ 想看更详细的日志
+     把 tinycast.env 的 LOG_LEVEL 改成 debug；
+     MediaMTX 的日志在 logs\mediamtx.log，或直接看它的窗口。
+
+
+八、安全提醒
+
+  - 回调接口 /internal/mtx/auth 默认只接受本机与内网来源；
+    如果 tinycast 前面有反向代理，请把 MEDIAMTX_AUTH_ALLOWED_CIDRS 收窄到
+    代理与 MediaMTX 的地址。
+    想再加一层：tinycast.env 设 MEDIAMTX_AUTH_SECRET=一串随机值，并把
+    mediamtx\mediamtx.yml 的 authHTTPAddress 改成
+    http://127.0.0.1:8080/internal/mtx/auth?secret=同一个值 。
+  - 推流令牌只在浏览器里生成，服务端只存 SHA-256 哈希，不会出现在房间列表里。
+  - 包内的 mediamtx.exe 来自 MediaMTX v1.21.3 官方发行版。
