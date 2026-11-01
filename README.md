@@ -146,6 +146,11 @@ SRS 的 Windows 构建取自官方 Release `v6.0-b0` 的 NSIS 安装包（sha256
 
 OBS「设置 → 直播 → 服务：自定义」中填入服务器与推流码即可。最终推流地址等价于 rtmp://live.example.com/live/username?room=...&token=...，SRS 会把查询串原样放进回调的 param 字段。
 
+> ⚠️ **请整段复制页面生成的推流码，不要手改房间名。**
+> 房间名里的中文会被 OBS 先解码一次，所以页面在推流码里做了双重百分号编码（OBS 解一次后线上仍是纯 ASCII）。
+> 如果手工输入未编码的中文房间名，SRS 会解析失败（code=3007 HttpParseUrl）并把整段查询串并进流名，
+> 结果是推流"看起来成功"、观众端却永久黑屏（页面会显示"推流码没有被服务器正确解析"）。
+
 - 用户名同时是 SRS 流名，因此房间详情页地址为 /r/<username>
 - 房间名称仅用于展示，不要求唯一
 - 令牌、用户名与房间名称保存在浏览器 localStorage，刷新后仍可查看，且不会上传服务器
@@ -284,6 +289,7 @@ go run ./cmd/tinysim token -user alex        # 打印一份可直接粘贴到 OB
 | OBS 提示推流失败 | 看 Go 日志中的 reason 字段：username_bound_to_other_token / token_bound_to_other_username / already_publishing 等；确认 5 分钟保留期是否已释放 |
 | 房间列表没有房间 | 只有 on_publish 放行后才会创建房间；检查 srs.conf 的 http_hooks 地址与端口 |
 | 页面能打开但一直黑屏 | 见下方「画面黑屏怎么排查」 |
+| 房间旁提示"推流码异常" | 推流码里的房间名被手改过或未编码，SRS 无法解析查询串；重新复制页面生成的推流码 |
 | 在线人数不准 | 确认 SRS 已开启 on_play / on_stop 回调；异常断开由定时任务核对 SRS 客户端列表兜底，可配置 SRS_CLIENTS_API_URL |
 | 播放 404 / CORS 报错 | 同源部署时配置 SRS_RTC_PROXY_TARGET=http://127.0.0.1:1985，由后端反代 /rtc/* |
 
@@ -296,6 +302,7 @@ SRS 6 的 `rtmp_to_rtc` **只做封装转换，不做视频转码**，浏览器�
 3. **UDP 8000 是否放通**：防火墙、云安全组、Docker 的 `8000-udp` 端口映射缺一不可；HTTPS 页面配 HTTP 的 WHEP 地址会被混合内容策略拦截。
 4. **candidate 是否可达**：默认 `candidate *` 由 SRS 自动探测网卡地址，本机与局域网都能连；云主机在 NAT 后面时要写公网 IP/域名，否则浏览器只会拿到内网候选地址。
 5. **用播放器的 🩺 诊断面板确认**：可展开看 ICE 状态、已解码帧数、分辨率与码率。帧数一直为 0 说明是上面 1~4 之一；帧数在涨却仍然黑屏，通常是浏览器硬件解码或截图工具的问题。
+6. **推流码里的房间名是否手改过**：SRS 解析不了含未编码中文的查询串（`Ignore parse url=... err code=3007(HttpParseUrl)`），会把查询串并进流名，播放端按干净名字请求永远拿不到媒体。这类房间会带 `warning=stream_unparsed`，页面顶部与房间卡片都会给出提示，让主播重新复制推流码即可。
 
 页面上的提示来自后端的 `media` 字段（`videoCodec`/`videoProfile`/`width`/`height` 等）与播放器 `getStats()` 的实时统计，后者在连续 6 秒收不到任何视频帧时触发，不必等页面报错。
 

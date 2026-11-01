@@ -116,6 +116,17 @@ func (i *StreamInspector) Stream(ctx context.Context, app, name string) (Stream,
 		i.cache[s.App+"/"+s.Name] = cacheEntry{stream: s, found: true, at: now}
 	}
 	if _, ok := i.cache[key]; !ok {
+		// SRS 解析 RTMP URL 失败时（例如推流参数里带着未编码的非 ASCII 字符）
+		// 会把整段查询串并进流名：name = "alex?room=..&token=.."。
+		// 这种流播放端访问不到，但编码信息仍然可读，按前缀匹配上，
+		// 页面就能显示"H.264 · 1280×720"并同时给出推流码提示。
+		for _, s := range streams {
+			if s.App == app && strings.HasPrefix(s.Name, name+"?") {
+				e := cacheEntry{stream: s, found: true, at: now}
+				i.cache[key] = e
+				return e.stream, true
+			}
+		}
 		i.cache[key] = cacheEntry{at: now}
 	}
 	e := i.cache[key]

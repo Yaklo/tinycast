@@ -4,6 +4,7 @@ import CopyField from './CopyField.vue'
 import { roomsState } from '../composables/useRooms'
 import { closePublishDialog, publishDialogMode, publishDialogOpen } from '../composables/usePublishDialog'
 import { copyText } from '../lib/clipboard'
+import { buildPublishCode, buildStreamURL } from '../lib/publish'
 import { generateToken } from '../lib/token'
 import { loadPublisher, savePublisher } from '../lib/storage'
 import type { SavedPublisher } from '../lib/storage'
@@ -19,7 +20,7 @@ const savedPublisher = ref<SavedPublisher | null>(null)
 const copiedAll = ref(false)
 
 const rtmpServer = computed(() => roomsState.config?.rtmpServer ?? '')
-const fullStreamURL = computed(() => (rtmpServer.value ? rtmpServer.value + '/' + publishCode.value : publishCode.value))
+const fullStreamURL = computed(() => buildStreamURL(rtmpServer.value, publishCode.value))
 
 function resetForm(): void {
   savedPublisher.value = loadPublisher()
@@ -40,11 +41,6 @@ function showSaved(): void {
   room.value = saved.room
   publishCode.value = buildPublishCode(saved.username, saved.room, saved.token)
   step.value = 'result'
-}
-
-function buildPublishCode(user: string, roomName: string, token: string): string {
-  // 房间名可能包含中文或空格，必须整体编码；username 已在后端校验为安全字符。
-  return user + '?room=' + encodeURIComponent(roomName) + '&token=' + token
 }
 
 function create(): void {
@@ -159,12 +155,20 @@ watch(publishDialogOpen, (open) => {
           </ol>
 
           <CopyField label="服务器地址" :value="rtmpServer || '（未获取到地址，请刷新页面）'" />
-          <CopyField label="推流码" :value="publishCode" hint="包含用户名、房间名与令牌" />
+          <CopyField label="推流码" :value="publishCode" hint="包含用户名、房间名与令牌，请整段复制，不要手改" />
 
           <details class="advanced">
             <summary>查看完整推流地址</summary>
             <CopyField label="完整地址" :value="fullStreamURL" />
           </details>
+
+          <div class="note">
+            <strong>请直接复制上面的推流码</strong>
+            <p>
+              房间名里的中文在推流码中是编码过的，OBS 会自动解码一次。手工输入或改动推流码里的房间名，
+              会让服务器解析失败，观众端只会看到黑屏。
+            </p>
+          </div>
 
           <div class="note note-warn">
             <strong>请妥善保存</strong>

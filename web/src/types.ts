@@ -11,6 +11,11 @@ export interface RoomView {
   startedAt: number
   /** GRACE 状态的释放时间点（Unix 毫秒），LIVE 时为 0。 */
   graceUntil: number
+  /**
+   * 房间健康告警码，正常时不存在。
+   * `stream_unparsed`：推流码里的查询串被 SRS 当成了流名的一部分，观众连得上但永远黑屏。
+   */
+  warning?: string
 }
 
 /** SSE 推送的完整状态快照。 */

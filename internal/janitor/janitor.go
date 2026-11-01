@@ -75,7 +75,14 @@ func (r *Runner) tick(ctx context.Context) {
 
 	alive := make(map[string]struct{}, len(clients))
 	for _, c := range clients {
-		if r.opts.App != "" && c.App != r.opts.App {
+		if c.ID == "" {
+			continue
+		}
+		// 只在两边都带 app 时才比较：SRS 6 的 /api/v1/clients/ 对推流连接
+		// （type=fmle-publish）经常返回 app=null、stream=vid-xxx，
+		// 若按 app 过滤掉所有空 app 的条目，alive 会永远是空的，
+		// 于是每个存活超过 minClientAge 的推流都会被误判成"已断开"。
+		if r.opts.App != "" && c.App != "" && c.App != r.opts.App {
 			continue
 		}
 		alive[c.ID] = struct{}{}

@@ -126,6 +126,11 @@ watch(
         </div>
       </header>
 
+      <p v-if="room.warning === 'stream_unparsed'" class="media-warn">
+        主播的推流码没有被服务器正确解析（房间名里有未编码的字符），观众端会一直黑屏。
+        请让主播回到首页「创建推流配置」重新复制推流码后再推流。
+      </p>
+
       <p v-if="room.state === 'LIVE' && issue" class="media-warn">
         {{ issue.title }}。{{ issue.detail }}
       </p>

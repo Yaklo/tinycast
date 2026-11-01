@@ -179,3 +179,34 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 		t.Fatal("Run 应在 ctx 取消后退出")
 	}
 }
+
+// SRS 6 的 /api/v1/clients/ 对推流连接（fmle-publish）返回 app=null、stream=vid-xxx，
+// 只有 id 是可信的。若按 app 过滤掉这些条目，存活的推流会被误判成"已断开"。
+func TestTickKeepsPublishingClientWithNullApp(t *testing.T) {
+	h, clock := newHub()
+	publish(t, h, "alice", "c1")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"clients": []map[string]any{
+				{"id": "c1", "app": nil, "stream": "vid-8346408", "publish": true, "type": "fmle-publish"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	runner := New(Options{
+		Hub:       h,
+		Log:       discardLogger(),
+		Interval:  time.Second,
+		App:       "live",
+		Inspector: srsapi.New(ts.URL+"/api/v1/clients/", "", ""),
+	})
+
+	clock.Advance(time.Minute)
+	runner.tick(context.Background())
+	if view, _ := h.Room("alice"); view.State != hub.StateLive {
+		t.Fatalf("app 为空的推流客户端仍应算存活，实际状态 %s", view.State)
+	}
+}

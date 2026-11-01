@@ -21,7 +21,18 @@ type RoomView struct {
 	StartedAt int64 `json:"startedAt"`
 	// GraceUntil 是 GRACE 状态的释放时间点（Unix 毫秒），LIVE 时为 0。
 	GraceUntil int64 `json:"graceUntil"`
+	// Warning 是房间的健康告警码，正常情况下为空。
+	// 目前只有一种：推流码里的查询串被 SRS 当成了流名的一部分（WarnStreamUnparsed），
+	// 此时观众连得上却永远收不到画面，必须提示主播重新复制推流码。
+	Warning string `json:"warning,omitempty"`
 }
+
+// WarnStreamUnparsed 表示 SRS 没能把推流 URL 里的查询串与流名分开。
+//
+// 触发条件是推流参数里出现了未编码的非 ASCII 字符（典型是中文房间名）：
+// SRS 解析 URL 失败后会退化成 name = "alex?room=测试&token=.."，
+// 而播放端按干净名字 alex 请求，于是另建了一个空 source，页面永久黑屏。
+const WarnStreamUnparsed = "stream_unparsed"
 
 // Snapshot 是一次完整的状态快照，通过 SSE 推送给前端。
 //
@@ -59,6 +70,9 @@ type PublishInput struct {
 	ClientID string
 	// IP 是推流端 IP，仅用于日志。
 	IP string
+	// StreamUnparsed 表示 SRS 回调里的流名仍带着查询串，
+	// 说明 SRS 没能解析推流 URL（见 WarnStreamUnparsed）。
+	StreamUnparsed bool
 }
 
 // PublishResult 是推流鉴权结果。

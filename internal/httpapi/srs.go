@@ -72,6 +72,12 @@ func (s *Server) handleSRSCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username, params := parseStreamParam(payload.Stream, payload.Param)
+	roomName := decodeRoomValue(params.Get("room"))
+	// SRS 只在查询串是纯 ASCII 时才能把它与流名分开；一旦带上了未编码的中文
+	// （OBS 会把推流码里的百分号编码先解一次），SRS 会报 code=3007(HttpParseUrl)
+	// 并把整段查询串并进流名，播放端于是永远拿不到画面。这里记下这个事实，
+	// 让页面提示主播重新复制推流码，而不是让观众对着黑屏猜。
+	streamUnparsed := strings.IndexByte(payload.Stream, '?') >= 0
 	if payload.App != "" && s.cfg.SRS.App != "" && payload.App != s.cfg.SRS.App {
 		// 不是本应用的事件（例如 SRS 同时承载了别的 app），直接放行不处理。
 		callbackOK(w)
@@ -86,11 +92,12 @@ func (s *Server) handleSRSCallback(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case actionPublish:
 		res := s.hub.Publish(hub.PublishInput{
-			Username: username,
-			RoomName: params.Get("room"),
-			Token:    params.Get("token"),
-			ClientID: payload.ClientID,
-			IP:       sourceIP,
+			Username:       username,
+			RoomName:       roomName,
+			Token:          params.Get("token"),
+			ClientID:       payload.ClientID,
+			IP:             sourceIP,
+			StreamUnparsed: streamUnparsed,
 		})
 		if !res.Allowed {
 			s.log.Warn("推流鉴权失败",
@@ -104,6 +111,11 @@ func (s *Server) handleSRSCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.log.Info("推流开始", "username", username, "room", res.Room.Room, "client", payload.ClientID, "ip", sourceIP)
+		if streamUnparsed {
+			s.log.Warn("推流 URL 未被 SRS 正确解析：房间名里含有未编码的字符，"+
+				"播放端将无法访问该流，请让主播重新复制页面生成的推流码",
+				"username", username, "stream", payload.Stream, "client", payload.ClientID)
+		}
 		callbackOK(w)
 
 	case actionUnpublish:
@@ -183,6 +195,24 @@ func parseStreamParam(stream, param string) (string, url.Values) {
 		}
 	}
 	return name, values
+}
+
+// decodeRoomValue 还原房间展示名。
+//
+// 房间名可能含中文，前端在生成推流码时会做百分号编码，而 OBS 在把推流码拼进
+// RTMP 地址前会先解码一次（实测：OBS 配置里存的是 room=%E6%B5%8B%E8%AF%95，
+// 发出去的却是 room=测试）。为了让 OBS 与 ffmpeg 这类不解码的客户端都能工作，
+// 前端做双重编码，这里对应地多解一层：两种来源最终都还原成同一份展示名。
+func decodeRoomValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	for i := 0; i < 2; i++ {
+		next, err := url.QueryUnescape(value)
+		if err != nil || next == value {
+			break
+		}
+		value = next
+	}
+	return value
 }
 
 // callbackOK 告诉 SRS 放行；SRS 要求 HTTP 200 且响应体为 0。

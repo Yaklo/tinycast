@@ -128,3 +128,29 @@ func TestStreamsURLOf(t *testing.T) {
 		}
 	}
 }
+
+// SRS 解析 RTMP URL 失败时会把查询串并进流名（name = "alex?room=..&token=.."），
+// 这种流播放端访问不到，但编码信息仍应能读出来，供页面给出提示。
+func TestStreamInspectorMatchesFoldedStreamName(t *testing.T) {
+	const folded = `{"code":0,"streams":[
+	  {"app":"live","name":"alex?room=%E6%B5%8B%E8%AF%95&token=TOK","clients":0,"publish":{"active":true},
+	   "video":{"codec":"H264","profile":"High","level":"3.1","width":1920,"height":1080},
+	   "audio":{"codec":"AAC","sample_rate":48000,"channel":2}}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, folded)
+	}))
+	defer srv.Close()
+
+	ins := NewStreamInspector(srv.URL, "", "")
+	got, ok := ins.Stream(context.Background(), "live", "alex")
+	if !ok {
+		t.Fatal("流名带查询串时也应能按前缀匹配到")
+	}
+	if got.Video.Codec != "H264" || got.Video.Width != 1920 {
+		t.Fatalf("编码信息解析错误: %+v", got.Video)
+	}
+	if _, ok := ins.Stream(context.Background(), "live", "alice"); ok {
+		t.Fatal("前缀不匹配的流不应命中")
+	}
+}

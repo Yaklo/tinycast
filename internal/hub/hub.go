@@ -48,6 +48,8 @@ type room struct {
 	graceUntil time.Time
 	// publishID 是当前 LIVE 连接的 SRS 客户端 ID，用于识别过期/重复回调。
 	publishID string
+	// warning 是当前推流的健康告警码，换一次推流就重新计算。
+	warning   string
 	viewers   map[string]time.Time
 	updatedAt time.Time
 }
@@ -170,6 +172,10 @@ func (h *Hub) Publish(in PublishInput) PublishResult {
 	}
 
 	rm.name = roomName
+	rm.warning = ""
+	if in.StreamUnparsed {
+		rm.warning = WarnStreamUnparsed
+	}
 	rm.state = StateLive
 	rm.startedAt = now
 	rm.graceUntil = time.Time{}
@@ -362,6 +368,7 @@ func (h *Hub) viewLocked(rm *room) RoomView {
 		State:       rm.state,
 		ViewerCount: len(rm.viewers),
 		StartedAt:   rm.startedAt.UnixMilli(),
+		Warning:     rm.warning,
 	}
 	if rm.state == StateGrace {
 		view.GraceUntil = rm.graceUntil.UnixMilli()

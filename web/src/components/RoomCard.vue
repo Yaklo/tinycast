@@ -30,6 +30,10 @@ const { label: graceLabel, expired: graceExpired } = useCountdown(() => props.ro
     <h3 class="room-name">{{ room.room }}</h3>
     <p class="room-user">@{{ room.username }}</p>
 
+    <p v-if="room.warning === 'stream_unparsed'" class="card-warn">
+      推流码异常，观众端会黑屏
+    </p>
+
     <div class="card-foot">
       <span v-if="room.state === 'GRACE'" class="foot-grace">
         {{ graceExpired ? '即将释放' : '保留中 · ' + graceLabel }}
@@ -111,6 +115,12 @@ const { label: graceLabel, expired: graceExpired } = useCountdown(() => props.ro
   color: var(--text-dim);
   font-family: var(--mono);
   overflow-wrap: anywhere;
+}
+
+.card-warn {
+  margin: 0;
+  font-size: 11.5px;
+  color: #fcd34d;
 }
 
 .card-foot {
