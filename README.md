@@ -8,6 +8,40 @@
 - 推流身份（用户名 + 令牌）由后端严格校验，令牌只存 SHA-256 哈希
 - 单个 Go 二进制内嵌全部前端资源，部署只有两个进程：mediamtx + tinycast
 
+## 快速开始
+
+三种方式任选一种，Windows 最省事。
+
+### 1. Windows（推荐）
+
+1. 拿到 `tinycast-<版本>-windows-amd64.zip`（发布包，见下文「发布与版本」），解压到本地磁盘；
+2. 双击 `start-all.cmd`，浏览器自动打开 <http://127.0.0.1:18855>。
+
+要从其它设备（局域网或公网）观看时，再右键 `open-firewall.cmd` → 以管理员身份运行放通端口；
+只在本机看不需要这一步。
+
+接着在首页点「创建推流配置」，把生成的服务器地址与推流码整段粘进 OBS 就能开播。
+
+### 2. Linux
+
+```bash
+tar -xzf tinycast-v0.1.0-linux-amd64.tar.gz
+cd tinycast-v0.1.0-linux-amd64
+./start.sh          # MediaMTX 与 TinyCast 一起跑，Ctrl+C 退出
+```
+
+### 3. Docker
+
+```bash
+cp .env.example .env       # 可选：填对外 IP 或域名
+docker compose up -d --build
+```
+
+浏览器访问 `http://<服务器地址>:18855`。
+
+> 对外提供服务时，把 `webrtcAdditionalHosts` 与 `MEDIAMTX_RTMP_PUBLIC_BASE` 改成真实地址，
+> 并放通 TCP 1935 / 18855 与 UDP 8000。
+
 ## 功能
 
 | 能力 | 说明 |
@@ -45,40 +79,6 @@
 ```
 
 两个进程可以同机也可以容器编排。浏览器全程只访问 18855，媒体端口无需对外暴露（WebRTC 的 UDP 8000 除外）。
-
-## 快速开始
-
-三种方式任选一种，Windows 最省事。
-
-### 1. Windows（推荐）
-
-1. 拿到 `tinycast-<版本>-windows-amd64.zip`（发布包，见下文「发布与版本」），解压到本地磁盘；
-2. 双击 `start-all.cmd`，浏览器自动打开 <http://127.0.0.1:18855>。
-
-要从其它设备（局域网或公网）观看时，再右键 `open-firewall.cmd` → 以管理员身份运行放通端口；
-只在本机看不需要这一步。
-
-接着在首页点「创建推流配置」，把生成的服务器地址与推流码整段粘进 OBS 就能开播。
-
-### 2. Linux
-
-```bash
-tar -xzf tinycast-v0.1.0-linux-amd64.tar.gz
-cd tinycast-v0.1.0-linux-amd64
-./start.sh          # MediaMTX 与 TinyCast 一起跑，Ctrl+C 退出
-```
-
-### 3. Docker
-
-```bash
-cp .env.example .env       # 可选：填对外 IP 或域名
-docker compose up -d --build
-```
-
-浏览器访问 `http://<服务器地址>:18855`。
-
-> 对外提供服务时，把 `webrtcAdditionalHosts` 与 `MEDIAMTX_RTMP_PUBLIC_BASE` 改成真实地址，
-> 并放通 TCP 1935 / 18855 与 UDP 8000。
 
 ## 发布与版本
 
