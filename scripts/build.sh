@@ -47,7 +47,8 @@ SUFFIX=""
 OUTDIR="bin"
 if [[ "${GOOS:-}" == "windows" ]]; then
   SUFFIX=".exe"
-  OUTDIR="bin/windows-amd64"
+  # WIN_OUTDIR 供打包脚本换成临时目录（例如目标目录里的 exe 正在 Windows 上运行）
+  OUTDIR="${WIN_OUTDIR:-bin/windows-amd64}"
   mkdir -p "$OUTDIR"
   # 清掉上一次生成的顶层文件；mediamtx/ 与 logs/ 原样保留，避免重复下载 30MB 的 MediaMTX
   rm -f "$OUTDIR"/*.exe "$OUTDIR"/*.cmd "$OUTDIR"/*.txt "$OUTDIR"/*.env
@@ -56,7 +57,7 @@ fi
 echo "==> 构建后端 ${GOOS:-本机}/${GOARCH:-本机}"
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$OUTDIR/tinycast$SUFFIX" ./cmd/tinycast
 
-if [[ "$OUTDIR" == "bin/windows-amd64" ]]; then
+if [[ "${GOOS:-}" == "windows" ]]; then
   # Windows 运行包：tinycast.exe + MediaMTX（需先跑 fetch-mediamtx-windows.sh）+ 启动脚本 + 说明
   cp deploy/windows/tinycast.env deploy/windows/start.cmd deploy/windows/start-all.cmd \
     deploy/windows/open-firewall.cmd deploy/windows/部署说明.txt "$OUTDIR/"

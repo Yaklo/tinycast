@@ -176,3 +176,9 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
     http://127.0.0.1:18855/internal/mtx/auth?secret=同一个值 。
   - 推流令牌只在浏览器里生成，服务端只存 SHA-256 哈希，不会出现在房间列表里。
   - 包内的 mediamtx.exe 来自 MediaMTX v1.21.3 官方发行版。
+
+九、从旧版本升级
+
+  - 网页端口从 8080 改成 18855，解压新包后请用 http://127.0.0.1:18855 访问；
+  - 覆盖旧目录前先关掉正在运行的 start-all.cmd 窗口，否则 tinycast.exe 被占用无法替换；
+  - 防火墙里旧的 "TinyCast TCP 8080" 规则，open-firewall.cmd 会自动删掉。

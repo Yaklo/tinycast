@@ -24,6 +24,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Older packages opened TCP 8080; drop that rule so wf.msc stays tidy.
+netsh advfirewall firewall delete rule name="TinyCast TCP 8080" dir=in >nul 2>&1
 call :allow "TinyCast TCP 1935" TCP 1935
 call :allow "TinyCast TCP 18855" TCP 18855
 call :allow "TinyCast UDP 8000" UDP 8000

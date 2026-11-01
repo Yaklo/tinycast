@@ -16,6 +16,7 @@ if [[ -x ".tools/go/bin/go" ]]; then
 fi
 
 OUTDIR="bin/windows-amd64"
+STAGE=".tools/winpkg-stage"
 ZIP="bin/tinycast-windows-amd64.zip"
 
 if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
@@ -23,13 +24,24 @@ if [[ ! -f "$OUTDIR/mediamtx/mediamtx.exe" ]]; then
   ./scripts/fetch-mediamtx-windows.sh
 fi
 
-./scripts/build.sh --windows
+# 目标目录里的 tinycast.exe 可能正在 Windows 上运行，此时删除会返回 Input/output error。
+# 这种情况改为在临时目录里构建，只更新 zip，不去动用户正在用的目录。
+WIN_OUTDIR="$OUTDIR"
+if [[ -e "$OUTDIR/tinycast.exe" ]] && ! rm -f "$OUTDIR/tinycast.exe" 2>/dev/null; then
+  echo "==> $OUTDIR/tinycast.exe 正在被占用（可能还在运行），改为在 $STAGE 构建"
+  WIN_OUTDIR="$STAGE"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE/mediamtx"
+  cp "$OUTDIR/mediamtx/mediamtx.exe" "$STAGE/mediamtx/mediamtx.exe"
+fi
+
+WIN_OUTDIR="$WIN_OUTDIR" ./scripts/build.sh --windows
 
 # 运行时日志不进压缩包（启动脚本会自己创建 logs 目录）
-rm -rf "$OUTDIR/logs"
+rm -rf "$WIN_OUTDIR/logs"
 
 echo "==> 打包 $ZIP"
-python3 - "$OUTDIR" "$ZIP" <<'PY'
+python3 - "$WIN_OUTDIR" "$ZIP" <<'PY'
 import os, sys, zipfile
 
 src, out = sys.argv[1], sys.argv[2]
