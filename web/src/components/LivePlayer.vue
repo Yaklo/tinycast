@@ -4,6 +4,10 @@ import { fetchPlay } from '../api'
 import { collectSample, emptySample, sparklinePath } from '../lib/stats'
 import type { StatsSample } from '../lib/stats'
 import { codecLabel, describeMedia, mediaIssue, noFrameHint } from '../lib/playback'
+import { ENGINE_OPTIONS, engineLabel, isSafariLike, mseSupported, resolveEngine } from '../lib/engine'
+import type { Engine, EnginePref } from '../lib/engine'
+import { deliveryLabel, firstVariantUrl, hasLowLatencyParts } from '../lib/playlist'
+import type { Delivery } from '../lib/playlist'
 import type { MediaInfo, Playback, RoomView } from '../types'
 
 /**
@@ -50,6 +54,45 @@ function saveMode(next: PlayMode): void {
 
 const mode = ref<PlayMode>(loadMode())
 const playback = ref<Playback | null>(null)
+
+const ENGINE_KEY = 'tinycast.hlsEngine'
+
+/** 记住用户选的播放引擎偏好；没选过就用「自动」（Safari 原生、其余 HLS.js）。 */
+function loadEnginePref(): EnginePref {
+  try {
+    const stored = localStorage.getItem(ENGINE_KEY)
+    return stored === 'js' || stored === 'native' ? stored : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+function saveEnginePref(next: EnginePref): void {
+  try {
+    localStorage.setItem(ENGINE_KEY, next)
+  } catch {
+    // 隐私模式下 localStorage 不可写，忽略即可
+  }
+}
+
+const enginePref = ref<EnginePref>(loadEnginePref())
+/** 这一次实际生效的引擎，由 resolveEngine 决定，可能和偏好不一致。 */
+const engine = ref<Engine | ''>('')
+/** 引擎降级 / 编码不匹配时的说明，显示在统计面板里。 */
+const engineNotice = ref('')
+/** 播放时真正在用的分发协议：LL-HLS、普通 HLS，还是 WebRTC。 */
+const delivery = ref<Delivery>('unknown')
+
+/** 最近一次决策时这个浏览器有没有原生 HLS 管线，模板用它把「原生」按钮置灰。 */
+const nativeReady = ref(false)
+
+/** 这个浏览器能不能用原生 HLS 管线（只有 Safari 家族算）。 */
+function canUseNative(video?: HTMLVideoElement | null): boolean {
+  if (typeof navigator === 'undefined' || !isSafariLike(navigator.userAgent)) return false
+  const el = video ?? videoEl.value
+  if (!el) return false
+  return el.canPlayType('application/vnd.apple.mpegurl') !== ''
+}
 
 const muted = ref(true)
 const theater = ref(false)
@@ -117,6 +160,10 @@ let edgeAt = 0
 let webrtcSince = 0
 /** 同一次播放里只自动回退一次，避免通道来回跳。 */
 let fallbackTried = false
+/** hls.js 解不了这个编码时，只自动降级到原生一次。 */
+let engineFallbackTried = false
+/** 自动降级的原因。start() 会清空面板状态，这条要留着让用户知道发生了什么。 */
+let fallbackNotice = ''
 
 /** 后端至少给出一个通道时，才显示通道切换（只有一侧可用时另一个按钮置灰）。 */
 const hasModes = computed(() => {
@@ -161,6 +208,8 @@ const grid = computed(() => {
   const media = props.media
   const rows: { label: string; value: string }[] = [
     { label: '播放通道', value: mode.value === 'hls' ? 'HLS' : 'WebRTC' },
+    { label: '播放方式', value: mode.value === 'hls' ? engineLabel(engine.value) : 'WebRTC' },
+    { label: '分发协议', value: deliveryLabel(delivery.value) },
     { label: '视频编码', value: labelOrDash(media?.videoCodec) },
     { label: '音频编码', value: labelOrDash(media?.audioCodec) },
     { label: '分辨率', value: resolution(s) },
@@ -332,6 +381,10 @@ async function start(): Promise<void> {
   lastCatchUp = 0
   edgePos = 0
   edgeAt = 0
+  engine.value = ''
+  engineNotice.value = fallbackNotice
+  delivery.value = 'unknown'
+  engineFallbackTried = false
 
   try {
     const data = await fetchPlay(props.room.username)
@@ -366,6 +419,38 @@ async function load(token: number): Promise<void> {
   armWatchdog(token)
 }
 
+/** 原生播放器不给分片信息，只能读一次清单，判断是 LL-HLS 还是普通 HLS。 */
+async function probeDelivery(url: string, token: number): Promise<void> {
+  try {
+    const masterUrl = new URL(url, location.href).toString()
+    const master = await fetch(masterUrl, { cache: 'no-store' })
+    if (token !== generation || !master.ok) return
+    const masterText = await master.text()
+    if (token !== generation) return
+    if (hasLowLatencyParts(masterText)) {
+      delivery.value = 'll-hls'
+      return
+    }
+    const variant = firstVariantUrl(masterText, masterUrl)
+    if (!variant) {
+      delivery.value = 'hls'
+      return
+    }
+    const child = await fetch(variant, { cache: 'no-store' })
+    if (token !== generation || !child.ok) return
+    delivery.value = hasLowLatencyParts(await child.text()) ? 'll-hls' : 'hls'
+  } catch {
+    // 探测失败不影响播放，面板显示「—」即可
+  }
+}
+
+/** 原生播放器报错时把话说明白：还能换回 HLS.js 再试一次。 */
+function onNativeError(): void {
+  const err = videoEl.value?.error
+  const detail = err ? err.message || 'code ' + err.code : '未知原因'
+  fail('原生播放器无法播放这个流（' + detail + '）。可在 🩺 面板把播放方式改成「HLS.js」再试。')
+}
+
 async function startHLS(token: number): Promise<void> {
   const url = playback.value?.hlsUrl
   const video = videoEl.value
@@ -376,12 +461,25 @@ async function startHLS(token: number): Promise<void> {
 
   video.muted = muted.value
 
-  // 只有 Safari / iOS 该走原生 HLS。Chromium（Chrome / Edge）的 canPlayType 对
-  // HLS 也会返回 "maybe"，但它并没有真正的 HLS 管线：交给它就会退化成整段下载、
-  // 延迟十几秒，而且完全用不上 LL-HLS 的分片。
-  const safariLike = !/Chrome\/|Chromium\/|Edg\/|Android/.test(navigator.userAgent)
-  if (safariLike && video.canPlayType('application/vnd.apple.mpegurl')) {
+  // 引擎选择：Chromium 的 canPlayType 对 HLS 也返回 "maybe"，但它没有真正的 HLS
+  // 管线（会退化成整段下载、延迟十几秒），所以把 Chromium 排除在「原生」之外。
+  // 具体落在哪个引擎由 lib/engine.ts 的 resolveEngine 决定，用户在 🩺 面板里可以改。
+  nativeReady.value = canUseNative(video)
+  const decision = resolveEngine({
+    pref: enginePref.value,
+    safariLike: typeof navigator === 'undefined' ? false : isSafariLike(navigator.userAgent),
+    canPlayNative: nativeReady.value,
+    mseSupported: mseSupported(),
+    videoCodec: props.media?.videoCodec,
+  })
+  engine.value = decision.engine
+  engineNotice.value = decision.notice || fallbackNotice
+
+  if (decision.engine === 'native') {
     video.src = url
+    // 原生管线不给分片信息，只能自己去读清单区分 LL-HLS 与普通 HLS。
+    void probeDelivery(url, token)
+    video.addEventListener('error', onNativeError, { once: true })
     video.addEventListener(
       'loadedmetadata',
       () => {
@@ -428,6 +526,10 @@ async function startHLS(token: number): Promise<void> {
     return
   }
   hls = instance as unknown as HlsHandle
+  // 强制走 hls.js 时（尤其是 Safari 上的 ManagedMediaSource），必须关掉远程播放，
+  // 否则浏览器不会解锁 MSE 的媒体源扩展。
+  ;(video as HTMLVideoElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = true
+  delivery.value = 'hls'
 
   instance.on(Hls.Events.MANIFEST_PARSED, () => {
     seekLive()
@@ -442,6 +544,10 @@ async function startHLS(token: number): Promise<void> {
       return
     }
     if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      // 编码不被 MSE 支持（Safari 上常见于 H.265 / AV1）：换原生播放器还有救，
+      // 反复 recoverMediaError 只会黑屏转圈，所以先降级一次。
+      const codecProblem = /addCodecError|appendError|incompatibleCodecs/i.test(String(data.details))
+      if (codecProblem && fallbackToNative()) return
       instance.recoverMediaError()
       return
     }
@@ -477,7 +583,9 @@ async function startHLS(token: number): Promise<void> {
 
   // 清单每次刷新都记下直播边缘位置，用来算「画面离直播头还有多远」。
   instance.on(Hls.Events.LEVEL_UPDATED, (_event, data) => {
-    const details = (data as unknown as { details?: { fragments?: { end?: number }[] } }).details
+    const details = (data as unknown as {
+      details?: { fragments?: { end?: number }[]; partTarget?: number }
+    }).details
     const fragments = details?.fragments ?? []
     const last = fragments[fragments.length - 1]
     const edge = Number(last?.end ?? 0)
@@ -485,6 +593,8 @@ async function startHLS(token: number): Promise<void> {
       edgePos = edge
       edgeAt = Date.now()
     }
+    // partTarget 只有清单里带 #EXT-X-PART-INF 时才有值，也就是 LL-HLS。
+    if (Number(details?.partTarget ?? 0) > 0) delivery.value = 'll-hls'
   })
 
   instance.loadSource(url)
@@ -509,6 +619,7 @@ async function startWebRTC(token: number): Promise<void> {
   const conn = new Ctor({ bundlePolicy: 'max-bundle' })
   pc = conn
   webrtcSince = Date.now()
+  delivery.value = 'whep'
 
   conn.addTransceiver('video', { direction: 'recvonly' })
   // 音频轨也留一条：MediaMTX 在没有音频时会补一条 PCMU 假轨，
@@ -794,6 +905,38 @@ function switchMode(next: PlayMode): void {
   if (props.room.state === 'LIVE') void start()
 }
 
+/**
+ * 换 HLS 的播放引擎。
+ *
+ * 两种引擎各有死角：HLS.js 指标全、延迟低，但 Safari 的 MSE 只解 H.264；原生播放器
+ * 省电、支持 AirPlay 与 H.265，却可能把延迟拖到十几秒。所以把选择权交给观众。
+ */
+function setEngine(next: EnginePref): void {
+  if (enginePref.value === next || mode.value !== 'hls') return
+  enginePref.value = next
+  saveEnginePref(next)
+  engineNotice.value = ''
+  fallbackNotice = ''
+  engineFallbackTried = false
+  if (props.room.state === 'LIVE') void start()
+  else retry()
+}
+
+/**
+ * hls.js 解不了当前编码时自动换成原生播放器。
+ * 只做一次：如果原生也不行，就让用户看到报错，别在两个引擎之间反复跳。
+ */
+function fallbackToNative(): boolean {
+  if (engineFallbackTried || enginePref.value === 'native' || !canUseNative()) return false
+  engineFallbackTried = true
+  enginePref.value = 'native'
+  saveEnginePref('native')
+  fallbackNotice = 'HLS.js 解不了当前编码，已自动改用浏览器原生播放器。'
+  engineNotice.value = fallbackNotice
+  retry()
+  return true
+}
+
 function retry(): void {
   if (retryTimer !== null) clearTimeout(retryTimer)
   retryTimer = setTimeout(() => {
@@ -1039,6 +1182,28 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="stats-facts">
+        <div v-if="mode === 'hls'" class="engine-row">
+          <span class="engine-label">播放方式</span>
+          <div class="engine-switch" role="group" aria-label="播放方式">
+            <button
+              v-for="option in ENGINE_OPTIONS"
+              :key="option.value"
+              type="button"
+              class="engine-btn"
+              :class="{ active: enginePref === option.value }"
+              :disabled="option.value === 'native' && !nativeReady"
+              :title="
+                option.value === 'native' && !nativeReady
+                  ? '这个浏览器没有原生 HLS 播放能力（只有 Safari / iOS 有）'
+                  : option.hint
+              "
+              @click="setEngine(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+        </div>
+        <p v-if="engineNotice" class="stats-note engine-notice">{{ engineNotice }}</p>
         <dl class="stats-grid">
           <template v-for="row in grid" :key="row.label">
             <dt>{{ row.label }}</dt>
@@ -1047,6 +1212,12 @@ onBeforeUnmount(() => {
         </dl>
         <p v-if="mode === 'hls'" class="stats-note">
           HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「低延迟」通道。
+          <template v-if="engine === 'native'">
+            原生播放器不把分片信息交给页面，所以码率、下载速率这类指标为空；它也可能按整段分片播放，延迟由系统决定。
+          </template>
+          <template v-else-if="delivery === 'll-hls'">
+            当前清单带 LL-HLS 分片（0.2 秒一片），播放器贴着直播边缘起播，延迟通常在 1 秒内。
+          </template>
         </p>
       </div>
     </aside>
@@ -1356,6 +1527,55 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
   color: var(--muted);
+}
+
+.engine-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.engine-label {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.engine-switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid var(--line);
+}
+
+.engine-btn {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.engine-btn.active {
+  background: rgba(99, 102, 241, 0.35);
+  color: #e0e7ff;
+}
+
+.engine-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.engine-notice {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.12);
+  color: #fde68a;
 }
 
 .chart-head {

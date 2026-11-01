@@ -347,6 +347,67 @@ describe('LivePlayer', () => {
     expect(hlsLog.loadSource.length).toBeGreaterThan(1)
   })
 
+  it('统计面板区分播放方式与 LL-HLS / 普通 HLS', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    hlsLog.emit('hlsManifestParsed')
+    hlsLog.emit('hlsLevelUpdated', { details: { fragments: [{ end: 10 }], partTarget: 0.2 } })
+    await vi.advanceTimersByTimeAsync(1100)
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const grid = wrapper.find('.stats-grid').text()
+    expect(grid).toContain('播放通道')
+    expect(grid).toContain('播放方式')
+    expect(grid).toContain('HLS.js')
+    expect(grid).toContain('分发协议')
+    expect(grid).toContain('LL-HLS')
+  })
+
+  it('统计面板里可以切换播放方式并记住选择', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const engines = wrapper.findAll('.engine-btn')
+    expect(engines.map((node) => node.text())).toEqual(['自动', 'HLS.js', '原生'])
+    expect(engines[0].classes()).toContain('active')
+
+    await engines[1].trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem('tinycast.hlsEngine')).toBe('js')
+    expect(fetchPlayMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('.engine-btn')[1].classes()).toContain('active')
+  })
+
+  it('HLS.js 解不了编码时自动换成原生播放器', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh) Version/17.4 Safari/605.1.15' })
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    // 决策发生在挂载时（此时 canPlayType 还不可用），这里补上原生能力再触发解码错误。
+    const video = wrapper.find('video').element as HTMLVideoElement
+    video.canPlayType = (() => 'maybe') as HTMLVideoElement['canPlayType']
+
+    hlsLog.emit('hlsError', { fatal: true, type: 'mediaError', details: 'bufferAddCodecError' })
+    await vi.advanceTimersByTimeAsync(400)
+    await flushPromises()
+    expect(localStorage.getItem('tinycast.hlsEngine')).toBe('native')
+    expect(wrapper.find('.engine-notice').text()).toContain('原生播放器')
+  })
+
   it('记住上次选择的通道', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls', true))
     const wrapper = mountPlayer()
