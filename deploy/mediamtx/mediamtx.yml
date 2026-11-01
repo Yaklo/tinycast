@@ -10,6 +10,7 @@ logLevel: info
 logDestinations: [stdout]
 
 # 供 tinycast 读取路径状态（/v3/paths/list）。默认端口 9997，只给本机。
+# 改这里的端口时必须同步改 tinycast 的 MEDIAMTX_API_URL，否则房间状态不会更新。
 api: yes
 apiAddress: 127.0.0.1:9997
 
@@ -23,7 +24,7 @@ hls: yes
 hlsAddress: 127.0.0.1:8888
 hlsVariant: lowLatency
 hlsPartDuration: 200ms
-hlsSegmentDuration: 1s
+hlsSegmentDuration: 1s  # 只在关键帧处切；建议 OBS 关键帧间隔设为 1 秒
 hlsDirectory: ""
 hlsAlwaysRemux: no
 
@@ -41,7 +42,8 @@ rtsp: no
 # 不启用 MoQ，省掉 8892/8893 两组端口
 moq: no
 
-# 所有推流/播放请求先问后端；后端按用户名 + 令牌判断能否推流
+# 所有推流/播放请求先问后端；后端按用户名 + 令牌判断能否推流。
+# 改 tinycast 的 HTTP_ADDR 时必须同步改这里的端口；启动时 tinycast 会自检并报错。
 authMethod: http
 authHTTPAddress: http://127.0.0.1:18855/internal/mtx/auth
 

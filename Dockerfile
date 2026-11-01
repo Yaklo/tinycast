@@ -30,7 +30,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \
-    && adduser -D -u 10001 tinycast
+    && adduser -D -u 10001 tinycast \
+    && mkdir -p /var/log/tinycast \
+    && chown tinycast:tinycast /var/log/tinycast
 LABEL org.opencontainers.image.title="TinyCast" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/Yaklo/tinycast"

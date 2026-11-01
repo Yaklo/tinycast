@@ -112,7 +112,15 @@ func (w *RotatingWriter) Close() error {
 
 func (w *RotatingWriter) rotate() error {
 	if err := w.file.Close(); err != nil {
-		return fmt.Errorf("logfile: 关闭旧日志失败: %w", err)
+		// 关闭失败后文件句柄状态不确定，先重新打开再继续写；
+		// 否则后续每次 Write 都会命中已关闭的句柄，日志静默消失。
+		w.file = nil
+		if openErr := w.open(); openErr != nil {
+			w.dead = true
+			return fmt.Errorf("logfile: 关闭旧日志失败且无法重新打开: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "logfile: 关闭旧日志失败，已继续写入原文件: %v\n", err)
+		return nil
 	}
 	w.file = nil
 	// 从最老的一份开始往后挪：xxx.log.2 -> xxx.log.3，xxx.log.1 -> xxx.log.2
@@ -122,7 +130,16 @@ func (w *RotatingWriter) rotate() error {
 		_ = os.Rename(old, newer)
 	}
 	if err := os.Rename(w.path, w.path+".1"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("logfile: 滚动日志失败: %w", err)
+		// Windows 上日志文件被杀毒软件或查看器占用时 rename 会失败。
+		// 此时必须把原文件重新打开继续写，否则后续日志会永久静默丢失。
+		if openErr := w.open(); openErr != nil {
+			w.dead = true
+			return fmt.Errorf("logfile: 滚动日志失败且无法重新打开: %w", err)
+		}
+		// 已经重新打开原文件，让本次写入继续；只往 stderr 提醒一次，
+		// 不要把错误返回给 Write，否则当前这条日志会丢。
+		fmt.Fprintf(os.Stderr, "logfile: 滚动日志失败，已继续写入原文件: %v\n", err)
+		return nil
 	}
 	return w.open()
 }

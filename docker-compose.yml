@@ -20,6 +20,12 @@ services:
     environment:
       HTTP_ADDR: ":18855"
       LOG_FILE: /var/log/tinycast/tinycast.log
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_CONSOLE_LEVEL: ${LOG_CONSOLE_LEVEL:-info}
+      LOG_MAX_MB: ${LOG_MAX_MB:-16}
+      LOG_KEEP: ${LOG_KEEP:-3}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
       ROOM_GRACE: ${ROOM_GRACE:-5m}
       MONITOR_INTERVAL: ${MONITOR_INTERVAL:-1s}
       VIEWER_TIMEOUT: ${VIEWER_TIMEOUT:-30s}
@@ -29,24 +35,26 @@ services:
       MEDIAMTX_HLS_PROXY_TARGET: http://mediamtx:8888
       MEDIAMTX_WHEP_PROXY_TARGET: http://mediamtx:8889
       MEDIAMTX_RTMP_PUBLIC_BASE: ${MEDIAMTX_RTMP_PUBLIC_BASE:-rtmp://localhost:1935/live}
-      MEDIAMTX_AUTH_ALLOWED_CIDRS: 127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
+      MEDIAMTX_AUTH_ALLOWED_CIDRS: ${MEDIAMTX_AUTH_ALLOWED_CIDRS:-127.0.0.0/8,::1/128,172.16.0.0/12}
+      MEDIAMTX_AUTH_SECRET: ${MEDIAMTX_AUTH_SECRET:-}
+      MEDIAMTX_API_USER: ${MEDIAMTX_API_USER:-}
+      MEDIAMTX_API_PASSWORD: ${MEDIAMTX_API_PASSWORD:-}
     volumes:
       - tinycast-logs:/var/log/tinycast
     ports:
       - "18855:18855"
-    depends_on:
-      - mediamtx
 
   mediamtx:
     image: bluenviron/mediamtx:1.21.3
     restart: unless-stopped
+    environment:
+      # 与 tinycast 用同一份回调密钥；为空时只依赖容器网络内的来源白名单
+      MTX_AUTHHTTPADDRESS: "http://tinycast:18855/internal/mtx/auth?secret=${MEDIAMTX_AUTH_SECRET:-}"
     volumes:
       - ./deploy/mediamtx/mediamtx.docker.yml:/mediamtx.yml:ro
     ports:
       - "1935:1935"    # OBS 推流
       - "8000:8000/udp" # WebRTC 媒体
-    depends_on:
-      - tinycast
 
 volumes:
   tinycast-logs:

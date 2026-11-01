@@ -32,7 +32,7 @@ call :allow "TinyCast UDP 8000" UDP 8000
 
 echo.
 echo Done. Current rules:
-netsh advfirewall firewall show rule name="TinyCast" dir=in | findstr /i "Rule Name LocalPort Protocol"
+netsh advfirewall firewall show rule name=all dir=in | findstr /i "TinyCast"
 echo.
 pause
 exit /b 0

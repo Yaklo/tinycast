@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -81,6 +82,7 @@ func run() error {
 	h := hub.New(cfg.RoomGrace)
 
 	mtxClient := mtx.New(cfg.MediaMTX.APIURL, cfg.MediaMTX.APIUser, cfg.MediaMTX.APIPassword)
+	checkMTXCallback(ctx, mtxClient, logger, cfg.HTTPAddr)
 	mon := monitor.New(h, mtxClient, monitor.Options{
 		App:            cfg.MediaMTX.App,
 		Interval:       cfg.MonitorInterval,
@@ -99,11 +101,16 @@ func run() error {
 	}
 
 	server := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(h, cfg, logger).Handler(),
+		Addr:    cfg.HTTPAddr,
+		Handler: httpapi.New(h, cfg, logger).Handler(),
+		// 所有请求的 Context 都挂在进程级 ctx 上：收到退出信号时 SSE 与反代
+		// 会立刻结束，Shutdown 不必再等满 10 秒的超时。
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// 不设置 WriteTimeout：SSE 需要长期保持连接。
+		// 只限制请求读取阶段：SSE 与 HLS 的响应可能持续很久，不能设 WriteTimeout。
+		ReadTimeout:    30 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	if *open {
@@ -141,7 +148,10 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return err
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		logger.Warn("优雅停机超时，已强制关闭剩余连接")
 	}
 	logger.Info("服务已停止")
 	return nil

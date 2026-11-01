@@ -1,12 +1,15 @@
 # MediaMTX 配置（docker compose 使用）
 #
-# 与 deploy/mediamtx/mediamtx.yml 的差别只有两处：
+# 与 deploy/mediamtx/mediamtx.yml 的差别：
 #   - 回调地址指向容器名 tinycast；
+#   - 各监听地址绑定容器网卡（宿主机版只绑 127.0.0.1）；
+#   - api 端口不映射到宿主机，只在 compose 网络内可用；
 #   - webrtcAdditionalHosts 额外带上 localhost，方便本机浏览器测试。
 
 logLevel: info
 logDestinations: [stdout]
 
+# 只在 compose 网络内暴露，docker-compose.yml 不映射该端口
 api: yes
 apiAddress: :9997
 
@@ -31,6 +34,7 @@ rtsp: no
 moq: no
 
 authMethod: http
+# 改 tinycast 的 HTTP_ADDR 时必须同步改这里的端口；启动时 tinycast 会自检并报错。
 authHTTPAddress: http://tinycast:18855/internal/mtx/auth
 
 paths:

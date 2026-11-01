@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -17,6 +18,10 @@ import (
 )
 
 // Monitor 周期性同步 MediaMTX → 内存状态。
+// maxAPIFailures 是连续拉取失败的容忍次数；超过后把 LIVE 房间降级为 GRACE，
+// 避免 MediaMTX 已经挂掉而页面一直显示“正在直播”。
+const maxAPIFailures = 5
+
 type Monitor struct {
 	hub            *hub.Hub
 	client         *mtx.Client
@@ -25,6 +30,8 @@ type Monitor struct {
 	viewerTimeout  time.Duration
 	bindingTimeout time.Duration
 	logger         *slog.Logger
+	failures       int
+	degraded       bool
 }
 
 // Options 汇总 Monitor 的可调参数。
@@ -59,6 +66,13 @@ func New(h *hub.Hub, client *mtx.Client, opts Options) *Monitor {
 
 // Run 阻塞轮询，直到 ctx 被取消。启动时先同步一次，避免首页空等一个周期。
 func (m *Monitor) Run(ctx context.Context) {
+	// 巡检 goroutine 里的 panic 不能拖垮整个进程（HTTP 有 recover，这里没有）。
+	defer func() {
+		if rec := recover(); rec != nil {
+			m.logger.Error("MediaMTX 状态巡检发生 panic", "panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+
 	m.Tick(ctx)
 
 	ticker := time.NewTicker(m.interval)
@@ -82,10 +96,34 @@ func (m *Monitor) Tick(ctx context.Context) bool {
 
 	paths, err := m.client.Paths(ctx)
 	if err != nil {
-		// 控制接口不可用时保持现状：MediaMTX 自己重启会让所有流短暂消失，
-		// 若据此把全部房间打成 GRACE，观众会看到一片"主播已断开"的假警报。
-		m.logger.Warn("拉取 MediaMTX 推流清单失败，本轮保持现状", "err", err)
+		m.failures++
+		switch {
+		case m.failures == 1:
+			// 偶发失败保持现状：MediaMTX 重启会让所有流短暂消失，
+			// 若据此把全部房间打成 GRACE，观众会看到一片假警报。
+			m.logger.Warn("拉取 MediaMTX 推流清单失败，本轮保持现状", "err", err)
+		case m.failures >= maxAPIFailures && !m.degraded:
+			m.degraded = true
+			n := 0
+			for _, room := range m.hub.Rooms() {
+				if room.State == hub.StateLive && m.hub.MarkGrace(room.Username) {
+					n++
+				}
+			}
+			m.logger.Error("MediaMTX 控制接口持续不可用，已把直播中的房间降级为断流保留",
+				"err", err, "failures", m.failures, "rooms", n)
+			if n > 0 {
+				changed = true
+			}
+		case m.failures%60 == 0:
+			m.logger.Warn("MediaMTX 控制接口仍不可用", "err", err, "failures", m.failures)
+		}
 	} else {
+		if m.degraded {
+			m.logger.Info("MediaMTX 控制接口已恢复")
+			m.degraded = false
+		}
+		m.failures = 0
 		changed = m.syncPaths(paths) || changed
 	}
 

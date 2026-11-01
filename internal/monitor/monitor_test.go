@@ -127,6 +127,33 @@ func TestTickKeepsStateWhenAPIFails(t *testing.T) {
 	}
 }
 
+// 控制接口长时间不可用时，不能让页面一直显示“正在直播”。
+func TestTickDegradesLiveRoomsAfterPersistentAPIFailure(t *testing.T) {
+	m, h, fake := newTestMonitor(t, time.Minute)
+	bind(t, h)
+	fake.set(pathsJSON(livePath))
+	m.Tick(context.Background())
+
+	fake.fail()
+	for i := 1; i <= maxAPIFailures; i++ {
+		m.Tick(context.Background())
+		view, _ := h.Room("alex")
+		if i < maxAPIFailures && view.State != hub.StateLive {
+			t.Fatalf("第 %d 次失败不应降级，实际 %s", i, view.State)
+		}
+	}
+	if view, _ := h.Room("alex"); view.State != hub.StateGrace {
+		t.Fatalf("连续 %d 次失败后应降级为 GRACE，实际 %s", maxAPIFailures, view.State)
+	}
+
+	// 恢复后继续按真实清单同步，流还在就回到 LIVE。
+	fake.set(pathsJSON(livePath))
+	m.Tick(context.Background())
+	if view, _ := h.Room("alex"); view.State != hub.StateLive {
+		t.Fatalf("接口恢复且流仍在时应回到 LIVE，实际 %s", view.State)
+	}
+}
+
 func TestTickIgnoresOtherAppsAndNotReadyPaths(t *testing.T) {
 	m, h, fake := newTestMonitor(t, time.Minute)
 	bind(t, h)
@@ -184,6 +211,7 @@ func TestTickExpiresIdleBindings(t *testing.T) {
 
 func TestTickBroadcastsChanges(t *testing.T) {
 	m, h, fake := newTestMonitor(t, time.Minute)
+	bind(t, h)
 	ch, release := h.Subscribe()
 	defer release()
 
