@@ -376,8 +376,11 @@ async function startHLS(token: number): Promise<void> {
 
   video.muted = muted.value
 
-  // Safari / iOS 原生支持 HLS，直接用 <video>，省掉 hls.js 与 MSE。
-  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+  // 只有 Safari / iOS 该走原生 HLS。Chromium（Chrome / Edge）的 canPlayType 对
+  // HLS 也会返回 "maybe"，但它并没有真正的 HLS 管线：交给它就会退化成整段下载、
+  // 延迟十几秒，而且完全用不上 LL-HLS 的分片。
+  const safariLike = !/Chrome\/|Chromium\/|Edg\/|Android/.test(navigator.userAgent)
+  if (safariLike && video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url
     video.addEventListener(
       'loadedmetadata',
@@ -406,17 +409,24 @@ async function startHLS(token: number): Promise<void> {
     return
   }
 
-  // hls.js 默认落后 3 个分片起播；MediaMTX 的分片对齐 OBS 关键帧（常见 2 秒），
-  // 于是观众一开始就落后 6 秒。这里压到 1 片、放宽追平速率，让它贴着直播边缘播。
-  const instance = new Hls({
-    lowLatencyMode: true,
-    liveSyncDurationCount: 1,
-    liveMaxLatencyDurationCount: 4,
-    maxLiveSyncPlaybackRate: 1.5,
-    backBufferLength: 10,
-    maxBufferLength: 4,
-    enableWorker: true,
-  })
+  // hls.js 默认落后 3 个分片起播，而分片长度跟着主播的关键帧间隔走（OBS 默认 2~4 秒），
+  // 于是观众一开始就落后 6~12 秒。这里按秒定目标、放宽追平速率，让它贴着直播边缘播。
+  // 用 liveSyncDuration 而不是 liveSyncDurationCount：前者按秒算，不受分片长度影响。
+  let instance: import('hls.js').default
+  try {
+    instance = new Hls({
+      lowLatencyMode: true,
+      liveSyncDuration: 1.2,
+      liveMaxLatencyDuration: 6,
+      maxLiveSyncPlaybackRate: 1.5,
+      backBufferLength: 10,
+      maxBufferLength: 4,
+      enableWorker: true,
+    })
+  } catch (err) {
+    fail('HLS 播放器初始化失败：' + (err instanceof Error ? err.message : String(err)))
+    return
+  }
   hls = instance as unknown as HlsHandle
 
   instance.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -439,24 +449,30 @@ async function startHLS(token: number): Promise<void> {
   })
 
   // 分片下载完成才知道真实码率与下载速率：HLS 没有 RTCP，这些只能自己量。
+  // 注意 hls.js 把字节数记在 frag.stats 上（事件本身没有 stats 字段），
+  // 而且视频分片的 type 是 'main' 不是 'video'。
   instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
-    const payload = data as unknown as {
-      frag?: { type?: string; duration?: number }
-      stats?: { loaded?: number; loading?: { start?: number; end?: number } }
-    }
-    const loaded = Number(payload.stats?.loaded ?? 0)
-    const duration = Number(payload.frag?.duration ?? 0)
+    const frag = (data as unknown as {
+      frag?: {
+        type?: string
+        duration?: number
+        stats?: { loaded?: number; total?: number; loading?: { start?: number; end?: number } }
+      }
+    }).frag
+    const stats = frag?.stats
+    const loaded = Number(stats?.total ?? 0) || Number(stats?.loaded ?? 0)
+    const duration = Number(frag?.duration ?? 0)
     if (loaded <= 0) return
     hlsBytes += loaded
-    const start = Number(payload.stats?.loading?.start ?? 0)
-    const stop = Number(payload.stats?.loading?.end ?? 0)
+    const start = Number(stats?.loading?.start ?? 0)
+    const stop = Number(stats?.loading?.end ?? 0)
     if (stop > start && stop > 0) {
       hlsLoads = [...hlsLoads, { bytes: loaded, ms: stop - start }].slice(-10)
     }
     if (duration <= 0) return
     const entry = { bytes: loaded, duration }
-    if (payload.frag?.type === 'audio') hlsAudioWindow = [...hlsAudioWindow, entry].slice(-8)
-    else if (payload.frag?.type === 'video') hlsVideoWindow = [...hlsVideoWindow, entry].slice(-8)
+    if (frag?.type === 'audio') hlsAudioWindow = [...hlsAudioWindow, entry].slice(-8)
+    else hlsVideoWindow = [...hlsVideoWindow, entry].slice(-8)
   })
 
   // 清单每次刷新都记下直播边缘位置，用来算「画面离直播头还有多远」。
@@ -792,14 +808,14 @@ function pokeControls(): void {
   if (controlsTimer !== null) clearTimeout(controlsTimer)
   controlsTimer = setTimeout(() => {
     controlsTimer = null
-    if (phase.value === 'playing' && !showStats.value) controlsVisible.value = false
+    if (phase.value === 'playing') controlsVisible.value = false
   }, 2500)
 }
 
 function hideControls(): void {
   if (controlsTimer !== null) clearTimeout(controlsTimer)
   controlsTimer = null
-  if (phase.value === 'playing' && !showStats.value) controlsVisible.value = false
+  if (phase.value === 'playing') controlsVisible.value = false
 }
 
 function toggleMute(): void {
@@ -884,149 +900,156 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    ref="stageEl"
-    class="player"
-    :class="['mode-' + mode, { 'is-theater': theater }]"
-    @dblclick="onStageDoubleClick"
-    @mousemove="pokeControls"
-    @touchstart.passive="pokeControls"
-    @mouseleave="hideControls"
-  >
-    <!-- 不写 controls：原生控件会和下面自绘的控制条叠在一起 -->
-    <video ref="videoEl" class="video" playsinline autoplay :muted="muted" />
+  <div class="player-layout">
+    <div
+      ref="stageEl"
+      class="player"
+      :class="['mode-' + mode, { 'is-theater': theater }]"
+      @dblclick="onStageDoubleClick"
+      @mousemove="pokeControls"
+      @touchstart.passive="pokeControls"
+      @mouseleave="hideControls"
+    >
+      <!-- 不写 controls：原生控件会和下面自绘的控制条叠在一起 -->
+      <video ref="videoEl" class="video" playsinline autoplay :muted="muted" />
 
-    <div v-if="phase !== 'playing'" class="overlay">
-      <template v-if="phase === 'connecting'">
-        <span class="spinner" aria-hidden="true"></span>
-        <p class="overlay-title">{{ mode === 'hls' ? '正在连接 HLS 播放…' : '正在建立 WebRTC 连接…' }}</p>
-        <p v-if="overlayNote" class="overlay-note">{{ overlayNote }}</p>
-      </template>
-      <template v-else>
-        <p class="overlay-title">无法播放</p>
-        <p class="overlay-note">{{ errorText }}</p>
-        <div class="overlay-actions">
-          <button class="overlay-btn" type="button" @click="retry">重新连接</button>
+      <div v-if="phase !== 'playing'" class="overlay">
+        <template v-if="phase === 'connecting'">
+          <span class="spinner" aria-hidden="true"></span>
+          <p class="overlay-title">{{ mode === 'hls' ? '正在连接 HLS 播放…' : '正在建立 WebRTC 连接…' }}</p>
+          <p v-if="overlayNote" class="overlay-note">{{ overlayNote }}</p>
+        </template>
+        <template v-else>
+          <p class="overlay-title">无法播放</p>
+          <p class="overlay-note">{{ errorText }}</p>
+          <div class="overlay-actions">
+            <button class="overlay-btn" type="button" @click="retry">重新连接</button>
+            <button
+              v-if="canSwitch"
+              class="overlay-btn ghost"
+              type="button"
+              @click="switchMode(mode === 'hls' ? 'webrtc' : 'hls')"
+            >
+              切换到 {{ mode === 'hls' ? 'WebRTC' : 'HLS' }}
+            </button>
+          </div>
+        </template>
+      </div>
+
+      <p v-if="phase === 'playing' && stallNote" class="stall-chip">{{ stallNote }}</p>
+
+      <p v-if="autoSwitchNote" class="stall-chip auto-chip">
+        <span>{{ autoSwitchNote }}</span>
+        <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
+      </p>
+
+      <p v-if="issue && issue.level === 'error' && issue.suggestMode" class="codec-hint">
+        <span>{{ issue.title }}</span>
+        <button type="button" class="overlay-btn" @click="switchMode(issue.suggestMode!)">
+          换到 {{ issue.suggestMode === 'hls' ? 'HLS' : '低延迟' }}
+        </button>
+      </p>
+
+      <div v-show="controlsVisible || phase !== 'playing'" class="controls">
+        <span class="live-chip"><i aria-hidden="true"></i>LIVE</span>
+
+        <div v-if="hasModes" class="mode-switch" role="group" aria-label="播放通道">
           <button
-            v-if="canSwitch"
-            class="overlay-btn ghost"
             type="button"
-            @click="switchMode(mode === 'hls' ? 'webrtc' : 'hls')"
+            class="mode-btn"
+            :class="{ active: mode === 'hls' }"
+            :disabled="!playback?.hlsUrl"
+            title="HLS：约 1 秒延迟，有声音，支持 H.264 / H.265"
+            @click="switchMode('hls')"
           >
-            切换到 {{ mode === 'hls' ? 'WebRTC' : 'HLS' }}
+            HLS
+          </button>
+          <button
+            type="button"
+            class="mode-btn"
+            :class="{ active: mode === 'webrtc' }"
+            :disabled="!playback?.whepUrl"
+            title="WebRTC：约 0.3 秒延迟，但 AAC 音频播不出来"
+            @click="switchMode('webrtc')"
+          >
+            低延迟
           </button>
         </div>
-      </template>
-    </div>
 
-    <p v-if="phase === 'playing' && stallNote" class="stall-chip">{{ stallNote }}</p>
+        <span class="media-chip" :title="describeMedia(props.media)">{{ describeMedia(props.media) || '编码未知' }}</span>
 
-    <p v-if="autoSwitchNote" class="stall-chip auto-chip">
-      <span>{{ autoSwitchNote }}</span>
-      <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
-    </p>
+        <button
+          v-if="mode === 'hls' && latencySec >= 2"
+          type="button"
+          class="latency-chip"
+          title="画面落后于直播，点一下追到最新"
+          @click="seekLive"
+        >
+          延迟 {{ latencySec.toFixed(1) }}s · 追平
+        </button>
 
-    <p v-if="issue && issue.level === 'error' && issue.suggestMode" class="codec-hint">
-      <span>{{ issue.title }}</span>
-      <button type="button" class="overlay-btn" @click="switchMode(issue.suggestMode!)">
-        换到 {{ issue.suggestMode === 'hls' ? 'HLS' : '低延迟' }}
-      </button>
-    </p>
+        <div class="spacer"></div>
 
-    <div v-show="controlsVisible || phase !== 'playing'" class="controls">
-      <span class="live-chip"><i aria-hidden="true"></i>LIVE</span>
-
-      <div v-if="hasModes" class="mode-switch" role="group" aria-label="播放通道">
         <button
           type="button"
-          class="mode-btn"
-          :class="{ active: mode === 'hls' }"
-          :disabled="!playback?.hlsUrl"
-          title="HLS：约 1 秒延迟，有声音，支持 H.264 / H.265"
-          @click="switchMode('hls')"
+          class="ctrl"
+          :class="{ on: showStats }"
+          title="显示播放统计"
+          @click="toggleStats"
         >
-          HLS
+          🩺
         </button>
-        <button
-          type="button"
-          class="mode-btn"
-          :class="{ active: mode === 'webrtc' }"
-          :disabled="!playback?.whepUrl"
-          title="WebRTC：约 0.3 秒延迟，但 AAC 音频播不出来"
-          @click="switchMode('webrtc')"
-        >
-          低延迟
+        <button type="button" class="ctrl" :class="{ on: muted }" :title="muted ? '取消静音' : '静音'" @click="toggleMute">
+          {{ muted ? '🔇' : '🔊' }}
         </button>
+        <button type="button" class="ctrl" :class="{ on: theater }" title="网页全屏" @click="toggleTheater">⛶</button>
+        <button type="button" class="ctrl" title="全屏" @click="toggleFullscreen">⤢</button>
+        <button type="button" class="ctrl" title="画中画" @click="togglePip">⧉</button>
       </div>
 
-      <span class="media-chip" :title="describeMedia(props.media)">{{ describeMedia(props.media) || '编码未知' }}</span>
-
-      <button
-        v-if="mode === 'hls' && latencySec >= 2"
-        type="button"
-        class="latency-chip"
-        title="画面落后于直播，点一下追到最新"
-        @click="seekLive"
-      >
-        延迟 {{ latencySec.toFixed(1) }}s · 追平
-      </button>
-
-      <div class="spacer"></div>
-
-      <button
-        type="button"
-        class="ctrl"
-        :class="{ on: showStats }"
-        title="显示播放统计"
-        @click="toggleStats"
-      >
-        🩺
-      </button>
-      <button type="button" class="ctrl" :class="{ on: muted }" :title="muted ? '取消静音' : '静音'" @click="toggleMute">
-        {{ muted ? '🔇' : '🔊' }}
-      </button>
-      <button type="button" class="ctrl" :class="{ on: theater }" title="网页全屏" @click="toggleTheater">⛶</button>
-      <button type="button" class="ctrl" title="全屏" @click="toggleFullscreen">⤢</button>
-      <button type="button" class="ctrl" title="画中画" @click="togglePip">⧉</button>
     </div>
 
-    <div v-if="showStats" class="stats">
-      <div class="chart-head">
-        <div>
-          <p class="chart-title">{{ METRICS.find((m) => m.key === metric)?.label }}（最近 60 秒）</p>
-          <p class="chart-value">{{ currentValue }}</p>
+    <aside v-if="showStats && !theater" class="stats">
+      <div class="stats-chart">
+        <div class="chart-head">
+          <div>
+            <p class="chart-title">{{ METRICS.find((m) => m.key === metric)?.label }}（最近 60 秒）</p>
+            <p class="chart-value">{{ currentValue }}</p>
+          </div>
+          <p class="chart-peak">峰值 {{ peakValue }}</p>
         </div>
-        <p class="chart-peak">峰值 {{ peakValue }}</p>
+
+        <svg class="chart" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true">
+          <path v-if="chartPath" class="chart-line" :d="chartPath" />
+          <text v-else class="chart-empty" x="130" y="36" text-anchor="middle">采样中…</text>
+        </svg>
+
+        <div class="chart-tabs">
+          <button
+            v-for="tab in metrics"
+            :key="tab.key"
+            type="button"
+            class="chart-tab"
+            :class="{ active: metric === tab.key }"
+            @click="metric = tab.key"
+          >
+            {{ tab.label }}
+          </button>
+        </div>
       </div>
 
-      <svg class="chart" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true">
-        <path v-if="chartPath" class="chart-line" :d="chartPath" />
-        <text v-else class="chart-empty" x="130" y="36" text-anchor="middle">采样中…</text>
-      </svg>
-
-      <div class="chart-tabs">
-        <button
-          v-for="tab in metrics"
-          :key="tab.key"
-          type="button"
-          class="chart-tab"
-          :class="{ active: metric === tab.key }"
-          @click="metric = tab.key"
-        >
-          {{ tab.label }}
-        </button>
+      <div class="stats-facts">
+        <dl class="stats-grid">
+          <template v-for="row in grid" :key="row.label">
+            <dt>{{ row.label }}</dt>
+            <dd>{{ row.value }}</dd>
+          </template>
+        </dl>
+        <p v-if="mode === 'hls'" class="stats-note">
+          HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「低延迟」通道。
+        </p>
       </div>
-
-      <dl class="stats-grid">
-        <template v-for="row in grid" :key="row.label">
-          <dt>{{ row.label }}</dt>
-          <dd>{{ row.value }}</dd>
-        </template>
-      </dl>
-      <p v-if="mode === 'hls'" class="stats-note">
-        HLS 走 HTTP 分片，拿不到 RTT / 抖动 / 丢包；要看这些请切到「低延迟」通道。
-      </p>
-    </div>
+    </aside>
   </div>
 </template>
 
@@ -1301,19 +1324,31 @@ onBeforeUnmount(() => {
   border-color: rgba(129, 140, 248, 0.45);
 }
 
+.player-layout {
+  display: block;
+}
+
+/* 统计面板收在播放器下方，不再盖住画面：宽屏左右分栏，窄屏上下叠放。 */
 .stats {
-  position: absolute;
-  right: 12px;
-  top: 12px;
-  z-index: 5;
-  width: min(320px, calc(100% - 24px));
-  max-height: calc(100% - 76px);
-  overflow: auto;
-  padding: 14px;
-  border-radius: 14px;
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 16px 18px;
+  border-radius: 16px;
   border: 1px solid var(--line);
-  background: rgba(6, 10, 16, 0.94);
-  backdrop-filter: blur(6px);
+  background: rgba(12, 18, 28, 0.92);
+}
+
+.stats-chart,
+.stats-facts {
+  min-width: 0;
+}
+
+@media (min-width: 880px) {
+  .stats {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+    align-items: start;
+  }
 }
 
 .stats-note {
@@ -1395,10 +1430,10 @@ onBeforeUnmount(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 5px 12px;
   margin: 0;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .stats-grid dt {
@@ -1419,10 +1454,7 @@ onBeforeUnmount(() => {
   }
 
   .stats {
-    position: static;
-    width: auto;
-    max-height: none;
-    margin-top: 8px;
+    padding: 14px;
   }
 }
 </style>

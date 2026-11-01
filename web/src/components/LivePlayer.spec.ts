@@ -246,12 +246,10 @@ describe('LivePlayer', () => {
     await flushPromises()
 
     hlsLog.emit('hlsFragLoaded', {
-      frag: { type: 'video', duration: 1 },
-      stats: { loaded: 500_000, loading: { start: 0, end: 250 } },
+      frag: { type: 'main', duration: 1, stats: { total: 500_000, loading: { start: 0, end: 250 } } },
     })
     hlsLog.emit('hlsFragLoaded', {
-      frag: { type: 'audio', duration: 1 },
-      stats: { loaded: 12_000, loading: { start: 0, end: 100 } },
+      frag: { type: 'audio', duration: 1, stats: { total: 12_000, loading: { start: 0, end: 100 } } },
     })
     hlsLog.emit('hlsLevelUpdated', { details: { fragments: [{ end: 10 }] } })
 
