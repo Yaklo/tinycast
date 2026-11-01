@@ -97,6 +97,12 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\run.ps1     # 读取 tin
 Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编译，产出一个可整目录拷走的运行包——前端已内嵌进 `tinycast.exe`，SRS 6 以官方 Windows 构建的形式放在 `srs/` 子目录里。
 
 ```bash
+./scripts/package-windows.sh     # 一条命令：构建 tinycast.exe + 准备 SRS 6 + 打成 zip
+```
+
+也可以分步执行：
+
+```bash
 ./scripts/build.sh --windows     # 交叉编译 tinycast.exe，并生成包内配置与启动脚本
 ./scripts/fetch-srs-windows.sh   # 放入 SRS 6 官方 Windows 构建（约 42MB，不入库）
 ```
@@ -109,7 +115,7 @@ Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编
 | `tinycast.env` | 全部运行配置（KEY=VALUE，逐项带注释），由 `-config` 读取 |
 | `start-all.cmd` | 生产启动：先拉起 SRS，再启动 tinycast 并打开首页 |
 | `start.cmd` | 只启动 tinycast（SRS 在别处时用），可传参如 `start.cmd -open` |
-| `srs/objs/srs.exe` | SRS 6.0.172 官方 Cygwin 构建，附 cygwin1.dll 等三个依赖 |
+| `srs/objs/srs.exe` | SRS 6.0.172 官方 Cygwin 构建，附 5 个 Cygwin 运行库（含官方包缺失的 cygiconv-2.dll、cygintl-8.dll） |
 | `srs/conf/srs.conf` | 由 [deploy/srs/srs.windows.conf](deploy/srs/srs.windows.conf) 复制，四个回调指向 `http://127.0.0.1:8080/internal/srs/*` |
 | `logs/`、`srs/logs/` | 运行日志目录，tinycast 日志默认 16MB 滚动、保留 3 份 |
 | `部署说明.txt` | 目录说明、上机步骤、局域网/HTTPS 改造、排查表 |
@@ -126,7 +132,7 @@ Windows 机器上不需要 Go / Node / Docker / SRS：在 Linux/WSL 侧交叉编
 
 长期运行：`tinycast.exe` 是控制台程序，Ctrl+C 即优雅停止；需要开机自启/崩溃重启时用「任务计划程序」触发 `start-all.cmd`，或用 NSSM / WinSW 把 `tinycast.exe` 注册成服务。
 
-SRS 的 Windows 构建取自官方 Release `v6.0-b0` 的 NSIS 安装包（sha256 固定在 [scripts/fetch-srs-windows.sh](scripts/fetch-srs-windows.sh) 中，脚本只解包，不运行安装程序、不写注册表）。SRS 官方把 Windows 版定位为测试用途，长期高负载生产建议用 Linux 版与 [deploy/srs/srs.conf](deploy/srs/srs.conf)。
+SRS 的 Windows 构建取自官方 Release `v6.0-b0` 的 NSIS 安装包（sha256 固定在 [scripts/fetch-srs-windows.sh](scripts/fetch-srs-windows.sh) 中，脚本只解包，不运行安装程序、不写注册表）。官方安装包的 `objs` 目录只带三个 Cygwin 运行库，而 `cygstdc++-6.dll` 还依赖 `cygiconv-2.dll`、`cygintl-8.dll`（缺了会在 Windows 上报「由于找不到 cygiconv-2.dll，无法继续执行代码」），脚本会从 Cygwin 官方软件源补齐这两个 DLL 并做依赖闭环校验；`start-all.cmd` 启动前也会先检查这 5 个 DLL。SRS 官方把 Windows 版定位为测试用途，长期高负载生产建议用 Linux 版与 [deploy/srs/srs.conf](deploy/srs/srs.conf)。
 
 ## OBS 推流配置
 

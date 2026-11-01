@@ -7,7 +7,11 @@
   start-all.cmd       启动 SRS + TinyCast（生产环境用这个）
   start.cmd           只启动 TinyCast（SRS 已在别处运行时用）
   srs\objs\srs.exe    SRS 6.0.172 官方 Windows 构建
-  srs\objs\*.dll     SRS 依赖的 Cygwin 运行库，必须与 srs.exe 同目录
+  srs\objs\*.dll     SRS 依赖的 Cygwin 运行库（5 个），必须与 srs.exe 同目录：
+                      cygwin1.dll、cyggcc_s-seh-1.dll、cygstdc++-6.dll、
+                      cygiconv-2.dll、cygintl-8.dll
+                      官方安装包只带前三个，缺后两个时 srs.exe 启动会报
+                      「由于找不到 cygiconv-2.dll，无法继续执行代码」，本包已补齐
   srs\conf\srs.conf  SRS 配置（四个回调指向 http://127.0.0.1:8080/internal/srs/*）
   srs\logs\srs.log   SRS 运行日志（由启动脚本重定向生成）
   logs\tinycast.log  TinyCast 日志（默认 16MB 滚动，保留 3 份）
@@ -67,6 +71,8 @@
   - 两个窗口可以分别关闭：关掉 SRS 窗口只会断流（房间进入 5 分钟保留期）。
 
 六、排查
+  - 启动 srs.exe 弹窗「由于找不到 cygiconv-2.dll / cygintl-8.dll」：objs 目录里少了文件，
+    确认 srs\objs 下 5 个 DLL 都在；直接从压缩包里解压整目录，不要只拷 srs.exe。
   - 首页没有房间：先看 logs\tinycast.log 有没有「推流开始」；OBS 侧连不上就看 srs\logs\srs.log。
   - OBS 推流被拒（StConnect 失败）：同一用户名+令牌已有一路推流，或令牌与他人用户名冲突；
     换一份配置，或等原身份 5 分钟释放后再推。
@@ -80,3 +86,6 @@
   SRS 侧为 6.0.172，取自 ossrs/srs 的 Release v6.0-b0 Windows 安装包（sha256 见仓库
   scripts/fetch-srs-windows.sh）；SRS 官方把 Windows 版定位为测试用途，
   真正的生产部署建议用 Linux 版 SRS，配置见仓库 deploy/srs/srs.conf。
+  官方包缺失的 cygiconv-2.dll、cygintl-8.dll 取自 Cygwin x86_64 官方软件源
+  （libiconv2-1.17-1、libintl8-0.22.5-1），sha256 同样固化在 fetch-srs-windows.sh 中，
+  取的是与包内 cygwin1.dll 同时期的版本，避免运行库 ABI 不匹配。

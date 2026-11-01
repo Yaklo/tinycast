@@ -15,6 +15,20 @@ if not exist "srs\conf\srs.conf" (
   pause
   exit /b 1
 )
+
+rem SRS is a Cygwin build: srs.exe needs these DLLs next to it, or Windows pops up
+rem "cygiconv-2.dll / cygintl-8.dll was not found" and never starts. Check them first.
+set "MISSING=0"
+for %%D in (cygwin1.dll cyggcc_s-seh-1.dll cygstdc++-6.dll cygiconv-2.dll cygintl-8.dll) do if not exist "srs\objs\%%D" (
+  echo [ERROR] srs\objs\%%D is missing.
+  set /a MISSING+=1
+)
+if not "%MISSING%"=="0" (
+  echo         Extract the whole package again; do not copy srs.exe alone.
+  pause
+  exit /b 1
+)
+
 if not exist "srs\logs" mkdir "srs\logs"
 
 echo [SRS] starting (1935/tcp rtmp, 1985/tcp http-api, 8000/udp webrtc) ...
