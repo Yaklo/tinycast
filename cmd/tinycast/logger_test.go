@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// 非 debug 模式下终端只留报错，信息级日志只进文件。
+// 显式把终端级别设成 error 时，信息级日志只进文件。
 func TestBuildLoggerKeepsConsoleQuiet(t *testing.T) {
 	var console, file bytes.Buffer
-	log := buildLogger(slog.LevelInfo, &console, &file)
+	log := buildLogger(slog.LevelError, slog.LevelInfo, &console, &file)
 
 	log.Info("逐请求访问日志", "path", "/api/rooms")
 	log.Warn("房间即将释放")
@@ -29,28 +29,27 @@ func TestBuildLoggerKeepsConsoleQuiet(t *testing.T) {
 	}
 }
 
-// debug 模式下终端与文件一致，方便本地排查。
-func TestBuildLoggerDebugMirrorsConsole(t *testing.T) {
+// 未单独配置时终端与文件一致。
+func TestBuildLoggerDefaultMirrorsFile(t *testing.T) {
 	var console, file bytes.Buffer
-	log := buildLogger(slog.LevelDebug, &console, &file)
+	log := buildLogger(slog.LevelInfo, slog.LevelInfo, &console, &file)
 
-	log.Debug("收到 SRS 回调", "action", "publish")
 	log.Info("推流开始", "username", "alex")
 
-	for _, want := range []string{"收到 SRS 回调", "推流开始"} {
+	for _, want := range []string{"推流开始"} {
 		if !strings.Contains(console.String(), want) {
-			t.Fatalf("debug 模式终端应输出 %q: %q", want, console.String())
+			t.Fatalf("终端应输出 %q: %q", want, console.String())
 		}
 		if !strings.Contains(file.String(), want) {
-			t.Fatalf("debug 模式日志文件应输出 %q: %q", want, file.String())
+			t.Fatalf("日志文件应输出 %q: %q", want, file.String())
 		}
 	}
 }
 
-// 未配置 LOG_FILE 时终端仍然只有报错，且不会 panic。
+// 未配置 LOG_FILE 时终端仍然按自己的级别输出，且不会 panic。
 func TestBuildLoggerWithoutFile(t *testing.T) {
 	var console bytes.Buffer
-	log := buildLogger(slog.LevelInfo, &console, nil)
+	log := buildLogger(slog.LevelError, slog.LevelInfo, &console, nil)
 
 	log.Info("不该出现")
 	log.Error("必须出现")
@@ -66,7 +65,7 @@ func TestBuildLoggerWithoutFile(t *testing.T) {
 // fanout 的 WithAttrs / WithGroup 必须把属性带到每一个处理器。
 func TestFanoutWithAttrsReachesEveryHandler(t *testing.T) {
 	var a, b bytes.Buffer
-	log := buildLogger(slog.LevelDebug, &a, &b).With("request", "r-1").WithGroup("http")
+	log := buildLogger(slog.LevelDebug, slog.LevelDebug, &a, &b).With("request", "r-1").WithGroup("http")
 
 	log.Error("请求失败", "status", 500)
 
@@ -76,6 +75,27 @@ func TestFanoutWithAttrsReachesEveryHandler(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%s缺少 %q: %q", name, want, out)
 			}
+		}
+	}
+}
+
+func TestParseConsoleLevel(t *testing.T) {
+	cases := []struct {
+		raw      string
+		fallback slog.Level
+		want     slog.Level
+	}{
+		{"", slog.LevelInfo, slog.LevelInfo},
+		{"", slog.LevelWarn, slog.LevelWarn},
+		{"debug", slog.LevelInfo, slog.LevelDebug},
+		{" INFO ", slog.LevelWarn, slog.LevelInfo},
+		{"warning", slog.LevelInfo, slog.LevelWarn},
+		{"error", slog.LevelInfo, slog.LevelError},
+		{"nonsense", slog.LevelInfo, slog.LevelInfo},
+	}
+	for _, c := range cases {
+		if got := parseConsoleLevel(c.raw, c.fallback); got != c.want {
+			t.Fatalf("parseConsoleLevel(%q, %v) = %v，期望 %v", c.raw, c.fallback, got, c.want)
 		}
 	}
 }

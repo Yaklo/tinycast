@@ -11,15 +11,23 @@ import (
 	"tinycast/internal/logfile"
 )
 
-// consoleLevel 决定终端的最低输出级别：非 debug 模式只让报错上屏。
-//
-// 逐请求访问日志与巡检日志只写进日志文件，终端保持安静；
-// LOG_LEVEL=debug 时终端与文件一致，方便本地排查。
-func consoleLevel(level slog.Level) slog.Level {
-	if level <= slog.LevelDebug {
-		return level
+// parseConsoleLevel 解析终端级别。未配置时跟随文件级别，
+// 这样"终端没输出、文件里却有日志"不会再次发生；需要安静时显式设 LOG_CONSOLE_LEVEL=error。
+func parseConsoleLevel(raw string, fallback slog.Level) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return fallback
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return fallback
 	}
-	return slog.LevelError
 }
 
 // parseLogLevel 把 LOG_LEVEL 解析成级别，无法识别时按 info 处理。
@@ -36,10 +44,11 @@ func parseLogLevel(raw string) slog.Level {
 	}
 }
 
-// newLogger 构造日志器：终端只输出报错（debug 模式除外），
-// 配置了 LOG_FILE 时再按 LOG_LEVEL 把完整日志按大小滚动落盘。
+// newLogger 构造日志器：终端级别默认与文件一致（LOG_LEVEL），
+// 可用 LOG_CONSOLE_LEVEL 单独调低；配置了 LOG_FILE 时再按大小滚动落盘。
 func newLogger() (*slog.Logger, io.Closer, error) {
 	level := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	console := parseConsoleLevel(os.Getenv("LOG_CONSOLE_LEVEL"), level)
 
 	var file io.Writer
 	var closer io.Closer
@@ -56,19 +65,19 @@ func newLogger() (*slog.Logger, io.Closer, error) {
 		closer = w
 	}
 
-	return buildLogger(level, os.Stdout, file), closer, nil
+	return buildLogger(console, level, os.Stdout, file), closer, nil
 }
 
-// buildLogger 按级别组装日志器：console 走 consoleLevel 过滤，file 走完整级别。
+// buildLogger 按级别组装日志器：console 与 file 各用各的门槛。
 //
 // 两个处理器用 fanout 组合，而不是 io.MultiWriter：多路写入必须各自持有一份级别，
 // 否则终端与文件只能共用一个门槛。
-func buildLogger(level slog.Level, console, file io.Writer) *slog.Logger {
+func buildLogger(consoleLevel, fileLevel slog.Level, console, file io.Writer) *slog.Logger {
 	handlers := []slog.Handler{
-		slog.NewTextHandler(console, &slog.HandlerOptions{Level: consoleLevel(level)}),
+		slog.NewTextHandler(console, &slog.HandlerOptions{Level: consoleLevel}),
 	}
 	if file != nil {
-		handlers = append(handlers, slog.NewTextHandler(file, &slog.HandlerOptions{Level: level}))
+		handlers = append(handlers, slog.NewTextHandler(file, &slog.HandlerOptions{Level: fileLevel}))
 	}
 	return slog.New(fanout{handlers: handlers})
 }
