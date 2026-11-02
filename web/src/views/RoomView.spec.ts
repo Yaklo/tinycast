@@ -37,6 +37,7 @@ vi.mock('../composables/useWatch', async () => {
     useWatch: () => ({
       viewerId: 'viewer-test',
       active: ref(false),
+      watchError: ref(null),
       start: watchMocks.start,
       stop: watchMocks.stop,
       leave: watchMocks.leave,

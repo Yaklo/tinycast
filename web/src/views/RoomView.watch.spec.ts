@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 import { toRaw } from 'vue'
 import RoomView from './RoomView.vue'
+import { ApiError } from '../api'
 import { refreshRooms, roomsState } from '../composables/useRooms'
 import type { RoomView as RoomVM } from '../types'
 
@@ -132,5 +133,66 @@ describe('RoomView 初次加载时的心跳', () => {
 
     expect(view.text()).toContain('LIVE 推流中')
     expect(apiMocks.postWatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('人数统计 429：播放器不受影响，只显示非阻塞提示', async () => {
+    apiMocks.postWatch.mockRejectedValueOnce(
+      new ApiError(429, 'viewer_limit', '同一网络人数已达上限', 10_000),
+    )
+    await pushRooms([room()])
+
+    const view = mountRoom()
+    await flushPromises()
+    await flushPromises()
+
+    expect(view.find('.player-stub').exists()).toBe(true)
+    expect(view.text()).toContain('LIVE 推流中')
+    expect(view.text()).toContain(
+      '同一网络下本房间的在线人数统计已达上限，本页仍可正常观看；关闭其他标签页后会自动恢复计数。',
+    )
+  })
+
+  it('房间总人数 429：提示房间人数上限，播放器仍在', async () => {
+    apiMocks.postWatch.mockRejectedValueOnce(
+      new ApiError(429, 'room_full', '房间人数已达上限', 30_000),
+    )
+    await pushRooms([room()])
+
+    const view = mountRoom()
+    await flushPromises()
+    await flushPromises()
+
+    expect(view.find('.player-stub').exists()).toBe(true)
+    expect(view.text()).toContain('房间观看人数已达上限，本页仍可正常观看，但暂时不计入在线人数。')
+  })
+
+  it('未知 429 也给非阻塞提示，不把限流说成播放故障', async () => {
+    apiMocks.postWatch.mockRejectedValueOnce(new ApiError(429, 'http_429', '请求失败（429）'))
+    await pushRooms([room()])
+
+    const view = mountRoom()
+    await flushPromises()
+    await flushPromises()
+
+    expect(view.find('.player-stub').exists()).toBe(true)
+    expect(view.text()).toContain('在线人数统计暂时被限流，本页仍可正常观看；稍后会自动重试。')
+  })
+
+  it('进入 GRACE 后隐藏人数上限提示，不展示假的实时状态', async () => {
+    apiMocks.postWatch.mockRejectedValueOnce(
+      new ApiError(429, 'viewer_limit', '同一网络人数已达上限', 10_000),
+    )
+    await pushRooms([room()])
+
+    const view = mountRoom()
+    await flushPromises()
+    await flushPromises()
+    expect(view.text()).toContain('同一网络下本房间的在线人数统计已达上限')
+
+    await pushRooms([room({ state: 'GRACE', graceUntil: Date.now() + 120_000 })])
+    await flushPromises()
+
+    expect(view.text()).toContain('主播已断开推流')
+    expect(view.text()).not.toContain('在线人数统计')
   })
 })

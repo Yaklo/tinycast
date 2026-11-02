@@ -44,6 +44,27 @@ const viewerWatch = useWatch(() => username.value, {
   canWatch: () => room.value?.state === 'LIVE',
 })
 
+/**
+ * 人数统计达到上限时给一句非阻塞提示：播放器仍然正常，只是这个标签页
+ * 暂时不计入在线人数。429 由 useWatch 按 Retry-After 自动重试，成功后清除。
+ */
+const watchLimitNote = computed(() => {
+  if (room.value?.state !== 'LIVE') return ''
+  const err = viewerWatch.watchError.value
+  if (err?.code === 'viewer_limit') {
+    return '同一网络下本房间的在线人数统计已达上限，本页仍可正常观看；关闭其他标签页后会自动恢复计数。'
+  }
+  if (err?.code === 'room_full') {
+    return '房间观看人数已达上限，本页仍可正常观看，但暂时不计入在线人数。'
+  }
+  // 反向代理或其它中间层也可能直接返回 429，并带自己的错误码；
+  // 这时仍要让观众知道只是人数统计被限流，画面没有坏。
+  if (err?.status === 429) {
+    return '在线人数统计暂时被限流，本页仍可正常观看；稍后会自动重试。'
+  }
+  return ''
+})
+
 const { label: graceLabel, expired: graceExpired } = useCountdown(() => room.value?.graceUntil ?? 0)
 
 async function load(): Promise<void> {
@@ -211,6 +232,7 @@ watch(
           </div>
 
           <p v-if="fetchError" class="side-note warn">{{ fetchError }}</p>
+          <p v-if="watchLimitNote" class="side-note limit">{{ watchLimitNote }}</p>
           <p v-if="!roomsState.connected" class="side-note">实时连接断开，正在自动重连…</p>
         </aside>
       </div>
@@ -435,6 +457,10 @@ watch(
 
 .side-note.warn {
   color: #fda4af;
+}
+
+.side-note.limit {
+  color: #fcd34d;
 }
 
 .state-panel {
