@@ -332,6 +332,91 @@ func TestPlayInGraceHasNoPlayback(t *testing.T) {
 	}
 }
 
+// GRACE 期间播放器已经卸载，心跳不应该再计数；这也避免断流保留期里
+// 首页和详情页挂着一个永远不会再更新的假人数。
+func TestWatchRejectsGraceRoom(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+	if !h.Watch("alex", "viewer-1") {
+		t.Fatal("LIVE 时应先记录一个观众")
+	}
+	h.MarkGrace("alex")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader(`{"viewerId":"viewer-2"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:50000"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("GRACE 期间心跳应返回 409，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "room_not_live") {
+		t.Fatalf("应返回 room_not_live 错误码，实际 %s", rec.Body.String())
+	}
+	if view, ok := h.Room("alex"); !ok || view.ViewerCount != 0 {
+		t.Fatalf("GRACE 房间观看人数应为 0，实际 %+v", view)
+	}
+}
+
+// GRACE 期间的 409 必须在 viewerCap 记账之前返回；否则断流瞬间的失败心跳
+// 会把同一网络的 16 个配额白白占满，恢复 LIVE 后正常观众反而被 429。
+func TestGraceWatchDoesNotConsumeViewerCap(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+	h.MarkGrace("alex")
+
+	post := func(viewer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader(`{"viewerId":"`+viewer+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "127.0.0.1:50000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < maxViewersPerRoomIP+1; i++ {
+		if rec := post(fmt.Sprintf("grace-%d", i)); rec.Code != http.StatusConflict {
+			t.Fatalf("GRACE 期间第 %d 次心跳应返回 409，实际 %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	h.ConfirmLive("alex", nil)
+	if rec := post("viewer-live"); rec.Code != http.StatusOK {
+		t.Fatalf("恢复 LIVE 后新观众应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// room_full 是房间总人数上限，和每客户端 viewer_limit 是两条不同的分支。
+func TestWatchRejectsWhenRoomFull(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+	for i := 0; i < hub.MaxViewersPerRoom; i++ {
+		if !h.Watch("alex", fmt.Sprintf("full-%d", i)) {
+			t.Fatalf("第 %d 个观众应能直接写入 hub", i+1)
+		}
+	}
+
+	// 换一个客户端地址，避免先撞上每客户端 16 个 viewerId 的 viewer_limit。
+	// 连续发 17 次：每次失败都必须把刚占的配额还回去，否则第 17 次会变成
+	// viewer_limit（证明失败心跳在泄漏配额）。
+	for i := 0; i < maxViewersPerRoomIP+1; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader(fmt.Sprintf(`{"viewerId":"over-%d"}`, i)))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "198.51.100.9:50000"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("房间满员第 %d 次应返回 429，实际 %d %s", i+1, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "room_full") {
+			t.Fatalf("房间满员第 %d 次应返回 room_full，实际 %s", i+1, rec.Body.String())
+		}
+		if rec.Header().Get("Retry-After") != "30" {
+			t.Fatalf("room_full 应给出 Retry-After: 30，实际 %q", rec.Header().Get("Retry-After"))
+		}
+	}
+}
+
 func TestPublishRejectsInvalidToken(t *testing.T) {
 	srv, _ := newTestServer(t, nil)
 
@@ -829,15 +914,18 @@ func TestWatchCapsViewersPerClient(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("超限的新 viewerId 应返回 429，实际 %d %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "room_full") {
-		t.Fatalf("应返回 room_full 错误码，实际 %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "viewer_limit") {
+		t.Fatalf("应返回 viewer_limit 错误码，实际 %s", rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != "10" {
+		t.Fatalf("viewer_limit 应给出 Retry-After: 10，实际 %q", rec.Header().Get("Retry-After"))
 	}
 	if view, ok := h.Room("alex"); !ok || view.ViewerCount != maxViewersPerRoomIP {
 		t.Fatalf("超限请求不应计入人数，实际 %+v", view)
 	}
 
 	// 主动离开必须立刻释放 viewerCap 配额，不能等 TTL：否则同一网络的新观众
-	// 在旧 viewerId 过期前都会看到 room_full。
+	// 在旧 viewerId 过期前都会看到 viewer_limit。
 	req := httptest.NewRequest(http.MethodDelete, "/api/rooms/alex/watch?viewerId=viewer-0", nil)
 	req.RemoteAddr = "127.0.0.1:50000"
 	rec = httptest.NewRecorder()

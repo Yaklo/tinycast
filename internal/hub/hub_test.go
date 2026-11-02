@@ -216,6 +216,9 @@ func TestConfirmLiveCreatesAndRestoresRoom(t *testing.T) {
 	}
 
 	// 断流 → GRACE；重推 → 恢复 LIVE 并清空保留期。
+	if !h.Watch("alex", "viewer-1") {
+		t.Fatal("LIVE 期间应接受观看心跳")
+	}
 	if !h.MarkGrace("alex") {
 		t.Fatal("断流应报告状态变化")
 	}
@@ -226,12 +229,21 @@ func TestConfirmLiveCreatesAndRestoresRoom(t *testing.T) {
 	if grace.Media != nil {
 		t.Fatal("断流后不应再展示编码参数")
 	}
+	if grace.ViewerCount != 0 {
+		t.Fatalf("断流后观看人数应立即归零，实际 %d", grace.ViewerCount)
+	}
+	if h.Watch("alex", "viewer-1") {
+		t.Fatal("GRACE 期间不应再接受观看心跳")
+	}
 
 	clock.advance(time.Minute)
 	h.ConfirmLive("alex", nil)
 	live, _ := h.Room("alex")
 	if live.State != StateLive || live.GraceUntil != 0 {
 		t.Fatalf("重推后应回到 LIVE：%+v", live)
+	}
+	if !h.Watch("alex", "viewer-1") {
+		t.Fatal("重推恢复 LIVE 后应重新接受观看心跳")
 	}
 }
 

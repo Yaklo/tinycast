@@ -291,13 +291,18 @@ func (h *Hub) MarkGrace(username string) bool {
 	}
 	rm.state = StateGrace
 	rm.graceUntil = h.now().Add(h.grace)
+	// 断流后播放器已经离场，旧观看会话不再代表"正在观看"。
+	// 立即清空并让快照人数归零，避免首页/详情页在保留期里显示一个
+	// 永远不会再心跳的假人数；重推后观众会重新上报。
+	clear(rm.viewers)
 	// 断流后原编码参数不再可信，重推时会重新探测。
 	rm.media = nil
 	return true
 }
 
 // Watch 记录一次观看心跳：同一个 viewerID 重复调用只会刷新时间，不会重复计数。
-// 返回值表示房间是否存在且人数未超限；重复心跳同样返回 true。
+// 返回值表示房间是否存在、是否处于 LIVE 且人数未超限；重复心跳同样返回 true。
+// GRACE 等非 LIVE 状态一律返回 false。
 func (h *Hub) Watch(username, viewerID string) bool {
 	_, ok := h.watch(username, viewerID)
 	return ok
@@ -319,6 +324,11 @@ func (h *Hub) watch(username, viewerID string) (added, ok bool) {
 
 	rm, exists := h.rooms[username]
 	if !exists {
+		return false, false
+	}
+	// 只有 LIVE 才接受观看心跳：GRACE 期间播放器已经卸载，继续计数只会
+	// 让保留倒计时旁边挂着一个假人数；重推恢复 LIVE 后前端会重新上报。
+	if rm.state != StateLive {
 		return false, false
 	}
 	if _, exists := rm.viewers[viewerID]; !exists {

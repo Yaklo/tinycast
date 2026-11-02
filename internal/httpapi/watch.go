@@ -59,6 +59,12 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
 		return
 	}
+	// GRACE 期间播放器已经卸载，前端也会停止心跳。仍到达这里的心跳（例如
+	// 断流前发出的请求）不应该再占 viewerCap 配额，更不应该凭空增加人数。
+	if view.State != hub.StateLive {
+		writeError(w, http.StatusConflict, "room_not_live", "房间当前没有直播，观看人数暂不统计")
+		return
+	}
 	// 每房间 + 每客户端的不同 viewerId 上限：人数按 viewerId 去重，而 viewerId
 	// 由浏览器自己生成，不封顶时一个人换着 ID 刷心跳就能把人数顶到房间上限。
 	// 重复心跳命中的是同一个 viewerId，不占新配额，正常观众完全不受影响。
@@ -66,15 +72,20 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	allowed, fresh := s.viewerCap.allow(capKey, viewerID)
 	if !allowed {
 		w.Header().Set("Retry-After", "10")
-		writeError(w, http.StatusTooManyRequests, "room_full", "同一网络观看该房间的人数已达上限，请稍后重试")
+		writeError(w, http.StatusTooManyRequests, "viewer_limit", "同一网络观看该房间的人数已达上限，请稍后重试")
 		return
+	}
+	// 这次心跳最终没有以 200 结束，就不能让刚新增的 viewerId 白占一个配额；
+	// 重复心跳（fresh=false）的槽位本来就有，不能误删。
+	releaseCap := func() {
+		if fresh {
+			s.viewerCap.forget(capKey, viewerID)
+		}
 	}
 	added, ok := s.hub.WatchChanged(view.Username, viewerID)
 	if !ok {
 		// 房间刚好释放或被占满：撤回这次记账，别让失败的心跳白占配额。
-		if fresh {
-			s.viewerCap.forget(capKey, viewerID)
-		}
+		releaseCap()
 		// 不能拿上面那份旧快照判断“是否满员”：并发心跳可能刚好把最后一个位置占满，
 		// 旧快照仍是 4999，会把 429 误报成 404。这里必须读一次最新状态。
 		current, exists := s.hub.Room(view.Username)
@@ -82,7 +93,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
 			return
 		}
+		if current.State != hub.StateLive {
+			writeError(w, http.StatusConflict, "room_not_live", "房间当前没有直播，观看人数暂不统计")
+			return
+		}
 		if current.ViewerCount >= hub.MaxViewersPerRoom {
+			// 配额真正释放取决于 VIEWER_TIMEOUT；这里给前端一个保守的退避值。
+			w.Header().Set("Retry-After", "30")
 			writeError(w, http.StatusTooManyRequests, "room_full", "该房间观看人数已达上限")
 			return
 		}
@@ -96,7 +113,15 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	updated, ok := s.hub.Room(view.Username)
 	if !ok {
+		releaseCap()
 		writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
+		return
+	}
+	// 心跳成功但房间恰好在这一瞬间断流：不要把快照当成“正在观看”返回。
+	// 此时 MarkGrace 已经清空 viewers，前端下一次心跳会收到同样的 409。
+	if updated.State != hub.StateLive {
+		releaseCap()
+		writeError(w, http.StatusConflict, "room_not_live", "房间当前没有直播，观看人数暂不统计")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
