@@ -22,7 +22,9 @@ source scripts/release-env.sh
 export DIST="${DIST:-dist}"
 mkdir -p "$DIST"
 # 只清理上一轮的发布包，避免历史产物混进本次 SHA256SUMS。
-rm -f "$DIST"/SHA256SUMS "$DIST"/tinycast-*-linux-*.tar.gz "$DIST"/tinycast-*-windows-*.zip
+# 只删 $DIST 下这两类产物（以及上次的校验和），不碰其它文件。
+rm -f "$DIST"/SHA256SUMS "$DIST"/SHA256SUMS.tmp \
+  "$DIST"/tinycast-*-linux-*.tar.gz "$DIST"/tinycast-*-windows-*.zip
 
 echo "==> 发布版本 $VERSION（commit $COMMIT，构建于 $BUILD_TIME）"
 ./scripts/package-linux.sh
@@ -31,5 +33,12 @@ echo "==> 发布版本 $VERSION（commit $COMMIT，构建于 $BUILD_TIME）"
 echo "==> 生成校验和"
 LINUX_PKG="tinycast-${VERSION}-linux-${GOARCH:-amd64}.tar.gz"
 WINDOWS_PKG="tinycast-${VERSION}-windows-amd64.zip"
-( cd "$DIST" && sha256sum "$LINUX_PKG" "$WINDOWS_PKG" > SHA256SUMS )
+for pkg in "$LINUX_PKG" "$WINDOWS_PKG"; do
+  if [[ ! -s "$DIST/$pkg" ]]; then
+    echo "缺少产物：$DIST/$pkg（打包步骤没有生成？）" >&2
+    exit 1
+  fi
+done
+# SHA256SUMS 只包含本次的两个产物；先写临时文件再改名，避免中途失败留下半份校验和。
+( cd "$DIST" && sha256sum "$LINUX_PKG" "$WINDOWS_PKG" > SHA256SUMS.tmp && mv -f SHA256SUMS.tmp SHA256SUMS )
 cat "$DIST/SHA256SUMS"

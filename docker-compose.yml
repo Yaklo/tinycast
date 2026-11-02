@@ -1,7 +1,17 @@
 # 一台机器跑完整套服务：MediaMTX 负责媒体，tinycast 负责业务
 #
+#   cp .env.example .env
+#   sed -i '/^MEDIAMTX_AUTH_SECRET=/d' .env \
+#     && printf 'MEDIAMTX_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 #   docker compose up -d --build
 #   # 浏览器打开 http://<服务器地址>:18855
+#
+# MEDIAMTX_AUTH_SECRET 是必填项：容器里的回调端口监听在 0.0.0.0:18856（容器网络内的
+# MediaMTX 要能访问），没有共享密钥时同网段任何人都能伪造推流鉴权。所以这里用 compose
+# 的 ${VAR:?msg} 语法 fail-fast：变量缺失或为空时 compose 直接报错退出，不会带着空密钥
+# 把服务跑起来。生成方式：openssl rand -hex 32
+# 注意：插值在解析配置阶段求值，所以 .env 缺失时 docker compose 的任何子命令
+# （包括 down / ps / logs）都会先报错退出 —— 先补 .env，再操作。
 #
 # 正式部署请把 MEDIAMTX_RTMP_PUBLIC_BASE 改成观众能访问的地址，
 # 并同步修改 deploy/mediamtx/mediamtx.docker.yml 里的 webrtcAdditionalHosts。
@@ -19,6 +29,8 @@ services:
     restart: unless-stopped
     environment:
       HTTP_ADDR: ":18855"
+      # 容器网络里 MediaMTX 要通过服务名回调，只能监听 0.0.0.0；
+      # 这个端口的暴露以 MEDIAMTX_AUTH_SECRET 必填为前提（见文件头）。
       INTERNAL_ADDR: "0.0.0.0:18856"
       LOG_FILE: /var/log/tinycast/tinycast.log
       LOG_LEVEL: ${LOG_LEVEL:-error}
@@ -36,8 +48,11 @@ services:
       MEDIAMTX_HLS_PROXY_TARGET: http://mediamtx:8888
       MEDIAMTX_WHEP_PROXY_TARGET: http://mediamtx:8889
       MEDIAMTX_RTMP_PUBLIC_BASE: ${MEDIAMTX_RTMP_PUBLIC_BASE:-rtmp://localhost:1935/live}
+      # 来源网段只是第二道防线：172.16.0.0/12 覆盖 Docker 默认桥接网段，
+      # 去掉它回调会失败；真正的鉴权靠下面的共享密钥。
       MEDIAMTX_AUTH_ALLOWED_CIDRS: ${MEDIAMTX_AUTH_ALLOWED_CIDRS:-127.0.0.0/8,::1/128,172.16.0.0/12}
-      MEDIAMTX_AUTH_SECRET: ${MEDIAMTX_AUTH_SECRET:-}
+      # 必填，缺失或为空时 compose 直接报错（生成：openssl rand -hex 32）
+      MEDIAMTX_AUTH_SECRET: ${MEDIAMTX_AUTH_SECRET:?MEDIAMTX_AUTH_SECRET 必填：openssl rand -hex 32 生成后写入 .env}
       MEDIAMTX_API_USER: ${MEDIAMTX_API_USER:-}
       MEDIAMTX_API_PASSWORD: ${MEDIAMTX_API_PASSWORD:-}
     volumes:
@@ -49,8 +64,9 @@ services:
     image: bluenviron/mediamtx:1.21.3
     restart: unless-stopped
     environment:
-      # 与 tinycast 用同一份回调密钥；为空时只依赖容器网络内的来源白名单
-      MTX_AUTHHTTPADDRESS: "http://tinycast:18856/internal/mtx/auth?secret=${MEDIAMTX_AUTH_SECRET:-}"
+      # 与 tinycast 上面的 MEDIAMTX_AUTH_SECRET 同源：两边都取同一个环境变量，
+      # 缺一不可（变量缺失时 compose 同样直接报错，不会生成空 secret）。
+      MTX_AUTHHTTPADDRESS: "http://tinycast:18856/internal/mtx/auth?secret=${MEDIAMTX_AUTH_SECRET:?MEDIAMTX_AUTH_SECRET 必填：openssl rand -hex 32 生成后写入 .env}"
     volumes:
       - ./deploy/mediamtx/mediamtx.docker.yml:/mediamtx.yml:ro
     ports:

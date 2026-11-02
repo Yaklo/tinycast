@@ -37,12 +37,18 @@ cd tinycast-*-linux-amd64
 ### 3. Docker
 
 ```bash
-cp .env.example .env       # 可选：填对外 IP 或域名
+cp .env.example .env
+# 必填：生成共享密钥写入 .env（先删旧行，重复执行不会堆两行）
+sed -i '/^MEDIAMTX_AUTH_SECRET=/d' .env
+printf 'MEDIAMTX_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 docker compose up -d --build
 ```
 
 浏览器访问 `http://<服务器地址>:18855`。
 
+> `MEDIAMTX_AUTH_SECRET` 是 compose 的必填变量（`${MEDIAMTX_AUTH_SECRET:?...}`）：`.env` 缺失或该值为空时，
+> `docker compose` 的任何子命令（含 `down` / `logs`）都会先报错退出——先补 `.env` 再操作。
+>
 > 对外提供服务时，把 `webrtcAdditionalHosts` 与 `MEDIAMTX_RTMP_PUBLIC_BASE` 改成真实地址，
 > 并放通 TCP 1935 / 18855 与 UDP 8000。
 
@@ -107,7 +113,7 @@ docker compose up -d --build
 查询版本：
 
 ```bash
-./tinycast -version         # 发布包解压后；例如 v0.1.0 (rev 6cca1d2, …, go1.27.3)
+./tinycast -version         # 发布包解压后；例如 v0.1.1 (rev …, <构建时间>, go1.27.3)
 ./bin/tinycast -version     # 从源码构建后；非 tag 提交会带 -N-g<sha> 后缀
 curl -s localhost:18855/api/version
 ```
@@ -239,9 +245,10 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
   `"maybe"`，但它的原生 HLS 只会整段下载、延迟十几秒，也拿不到分片。只有 Safari / iOS 走原生 HLS；
 - `liveSyncDuration` + `lowLatencyMode`：按**秒**定目标，不受分片长度影响
   （换成 `liveSyncDurationCount: 1` 就会跟着 OBS 的关键帧间隔退成 4 秒）；「低延时」档设 1.2 秒，「稳定」档设 3 秒；
-- 每秒量一次「直播边缘 − 当前播放位置」，低延时档**落后超过 1.8 秒就自动跳到边缘**（6 秒内最多跳一次，避免频繁跳）；
+- 每秒量一次「直播边缘 − 当前播放位置」，低延时档**落后超过 1.8 秒就自动跳到当前档位的目标延迟位置**（约 1.2 秒，6 秒内最多跳一次，避免频繁跳）；
 - `maxLiveSyncPlaybackRate: 1.5`：差得不多时用 1.5 倍速悄悄追上，不跳画面；
-- 需要立刻回到最新画面时，点控制栏的 ↻（刷新播放）重建播放器，它会直接从直播边缘重新起播；🩺 面板里的「直播延迟」显示当前落后多少；
+- 需要立刻回到当前档位的目标延迟时，点控制栏的 ↻（刷新播放）重建播放器：HLS.js 下它会回到「直播边缘 − 当前档位目标延迟」的位置
+ （稳定档约 3 秒、低延时档约 1.2 秒），不是严格贴着边缘；🩺 面板里的「直播延迟」显示当前落后多少；
 - 「缓冲余量」是 MSE 里排在播放位置后面的数据量，它比延迟大一点是正常的，别把它当延迟。
 
 实测（Edge + 本项目 `/hls/` 反代，1280×720@60，低延时档）：OBS 默认关键帧 4 秒时直播延迟 **1.2 秒**，
@@ -255,7 +262,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 
 | 档位 | 目标延迟 | 前向缓冲 | 主动追平 | 适合 |
 | --- | --- | --- | --- | --- |
-| 低延时 | 1.2 秒 | 4 秒 | 落后 >1.8 秒跳边缘，差得少时 1.5 倍速追 | 网络好、一直盯着看 |
+| 低延时 | 1.2 秒 | 4 秒 | 落后 >1.8 秒跳到目标延迟位置，差得少时 1.5 倍速追 | 网络好、一直盯着看 |
 | 稳定（默认） | 3 秒 | 6 秒 | 不主动追 | 弱网、投屏、公共 Wi-Fi |
 
 - 两档走的都是 LL-HLS，区别只在「画面落后直播边缘多远」；默认是 **LL-HLS + 稳定档**，弱网下不容易卡。
@@ -339,7 +346,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | `MEDIAMTX_APP` | `live` | 推流 app 名（RTMP 地址里的 `/live`） |
 | `MEDIAMTX_API_URL` | `http://127.0.0.1:9997` | 路径状态 API |
 | `MEDIAMTX_API_USER` / `MEDIAMTX_API_PASSWORD` | 空 | 仅当 MediaMTX 通过 `authInternalUsers` 保护 API 时填写；默认配置未启用 |
-| `MEDIAMTX_AUTH_SECRET` | 空 | 回调共享密钥，需与 mediamtx.yml 的 `?secret=` 一致 |
+| `MEDIAMTX_AUTH_SECRET` | 空（docker compose 必填） | 回调共享密钥，需与 mediamtx.yml 的 `?secret=` 一致 |
 | `MEDIAMTX_AUTH_ALLOWED_CIDRS` | 127.0.0.0/8,::1/128 | 允许回调的来源网段；Docker 需显式放开容器网段 |
 | `MEDIAMTX_HLS_PROXY_TARGET` | `http://127.0.0.1:8888` | `/hls/` 上游 |
 | `MEDIAMTX_WHEP_PROXY_TARGET` | `http://127.0.0.1:8889` | `/rtc/` 上游 |
@@ -350,7 +357,7 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 时长支持 `90s`、`5m`、`2m30s` 或纯秒数 `300`。
 
 `INTERNAL_ADDR` 若配成非回环地址（例如容器里的 `0.0.0.0:18856`），必须同时设置 `MEDIAMTX_AUTH_SECRET`；
-否则同网段任何人都能伪造推流鉴权，启动日志会打 ERROR 提醒。
+否则同网段任何人都能伪造推流鉴权，这种组合会让启动直接失败并提示改用回环地址或补上密钥。
 
 回调用独立端口时，`mediamtx.yml` 的 `authHTTPAddress` 必须指向 `INTERNAL_ADDR`（默认 `18856`）；
 两边不一致时 tinycast 启动会打 ERROR 提示。用同机反向代理把整站转给 tinycast 时，
@@ -425,7 +432,7 @@ dist/                    发布产物（不入库）
 | 房间在但画面黑 | 🩺 面板看下载速率与帧率；H.265 在 Linux 浏览器需换 H.264；局域网看 UDP 8000 |
 | WebRTC 通道没声音 | 正常现象，MediaMTX 不转码；改用 LL-HLS 或 HLS 通道 |
 | WebRTC 通道连上但马上断开 / 没画面 | OBS 的 H.264 默认带 B 帧，MediaMTX 会直接断开会话；播放器会自动回退 LL-HLS，把「最大 B 帧数」设为 0 后可再用 WebRTC |
-| HLS 延迟好几秒 | 点控制栏的 ↻（刷新播放）重新起播；长期偏高就把 OBS 关键帧间隔改成 1 秒，或检查上传带宽是否触顶 |
+| HLS 延迟好几秒 | 点控制栏的 ↻（刷新播放）重建播放器，回到当前档位的目标延迟（稳定 3 秒 / 低延时 1.2 秒）；长期偏高就把 OBS 关键帧间隔改成 1 秒，或检查上传带宽是否触顶 |
 | 统计面板里 RTT / 抖动 / 丢包只有「—」 | LL-HLS / HLS 是 HTTP 分片，没有这些 RTP 指标；切到「WebRTC」才显示 |
 | 统计面板里码率、累计接收只有「—」 | 前端是旧版本（面板只拿到带宽估值）；换成当前版本的包，HLS 会读 hls.js 的分片加载事件 |
 | 面板显示「原生播放器」且延迟好几秒 | Safari 的原生 HLS 不读 LL-HLS 分片，改成「HLS.js」；H.265 就别改 |
