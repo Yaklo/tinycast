@@ -328,14 +328,19 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 | * | `/hls/*`、`/rtc/*` | 反代到 MediaMTX 的 HLS / WHEP（含 302 改写） |
 
 在线人数 = 该房间在 `VIEWER_TIMEOUT` 内有过心跳的 `viewerId` 数量。
-重复心跳天然幂等，关闭页面时前端会主动 `DELETE`。
+重复心跳天然幂等，关闭页面时前端会主动 `DELETE`。断流进入 GRACE 时人数立即清零，
+此时心跳返回 409 `room_not_live`，前端停止上报并在恢复 LIVE 后自动重新开始。
+
+同一房间、同一客户端最多保留 16 个 `viewerId`；超过时心跳返回 429 `viewer_limit`，
+房间总人数达到上限时返回 429 `room_full`。两者都只暂停当前标签页的人数统计，
+播放不受影响，前端会按 `Retry-After` 自动重试。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:18855` | 公网监听地址 |
-| `INTERNAL_ADDR` | 空 | 只给 MediaMTX 回调用的内部监听地址。设置后公网端口不再注册 `/internal/` 路由；留空表示与 `HTTP_ADDR` 共用。Docker 与两个发布包默认启用 `18856` |
+| `INTERNAL_ADDR` | 空 | 只给 MediaMTX 回调用的内部监听地址。设置后公网端口不再注册 `/internal/` 路由；留空表示与 `HTTP_ADDR` 共用。显式配成与 `HTTP_ADDR` 相同的监听地址会拒绝启动。Docker 与两个发布包默认启用 `18856` |
 | `PUBLIC_BASE_URL` | 空 | 对外地址，用于播放地址前缀；留空按浏览器地址推断 |
 | `TRUSTED_PROXIES` | 127.0.0.0/8,::1/128 | 只有这些来源的 X-Forwarded-For 才被采信；反代在别的网段时按实际填写。反向代理必须**覆写** XFF，不能把客户端自带的值追加进去 |
 | `LOG_LEVEL` / `LOG_CONSOLE_LEVEL` / `LOG_FILE` / `LOG_MAX_MB` / `LOG_KEEP` | `error` / 跟随 `LOG_LEVEL` / 空 / `16` / `3` | 默认只记录 error；排查时把 `LOG_LEVEL` 设为 info/debug。`LOG_CONSOLE_LEVEL` 留空跟随 `LOG_LEVEL`。Windows/Linux 的启动脚本会在每次启动时检查 MediaMTX 日志，超过 16 MB 就滚动并保留三份 |
@@ -358,6 +363,9 @@ MediaMTX 给的是 **LL-HLS**（低延迟 HLS）：清单里有
 
 `INTERNAL_ADDR` 若配成非回环地址（例如容器里的 `0.0.0.0:18856`），必须同时设置 `MEDIAMTX_AUTH_SECRET`；
 否则同网段任何人都能伪造推流鉴权，这种组合会让启动直接失败并提示改用回环地址或补上密钥。
+
+显式把 `INTERNAL_ADDR` 配成与 `HTTP_ADDR` 相同的监听地址（包括 `:18855`、`0.0.0.0:18855`、`[::]:18855` 这类等价写法）
+会把 `/internal/` 回调重新挂回公网端口，启动会直接失败；要共用端口只能留空 `INTERNAL_ADDR`。
 
 回调用独立端口时，`mediamtx.yml` 的 `authHTTPAddress` 必须指向 `INTERNAL_ADDR`（默认 `18856`）；
 两边不一致时 tinycast 启动会打 ERROR 提示。用同机反向代理把整站转给 tinycast 时，
