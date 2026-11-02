@@ -9,6 +9,7 @@ import (
 
 func internalAddrConfig(internalAddr, secret string) *config.Config {
 	return &config.Config{
+		HTTPAddr:     "127.0.0.1:18855",
 		InternalAddr: internalAddr,
 		MediaMTX:     config.MediaMTXConfig{AuthSecret: secret},
 	}
@@ -37,6 +38,27 @@ func TestValidateInternalAddrReportsMalformedAddr(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "host:port") {
 			t.Fatalf("错误信息应提示 host:port 形式，实际 %v", err)
+		}
+	}
+}
+
+// 显式把回调地址配成公网端口等于把 /internal/ 重新暴露出去，必须拒绝启动；
+// 想共用端口只能留空 INTERNAL_ADDR。
+func TestValidateInternalAddrRejectsSameAsHTTP(t *testing.T) {
+	cases := []struct{ httpAddr, internalAddr string }{
+		{"127.0.0.1:18855", "127.0.0.1:18855"},
+		{"0.0.0.0:18855", ":18855"},
+		{"[::]:18855", "0.0.0.0:18855"},
+	}
+	for _, tc := range cases {
+		cfg := internalAddrConfig(tc.internalAddr, "s3cret")
+		cfg.HTTPAddr = tc.httpAddr
+		err := validateInternalAddr(cfg)
+		if err == nil {
+			t.Fatalf("HTTP_ADDR=%s INTERNAL_ADDR=%s 应拒绝启动", tc.httpAddr, tc.internalAddr)
+		}
+		if !strings.Contains(err.Error(), "同一个监听地址") {
+			t.Fatalf("错误信息应说明地址冲突，实际 %v", err)
 		}
 	}
 }

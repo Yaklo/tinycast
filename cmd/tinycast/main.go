@@ -87,9 +87,6 @@ func run() (err error) {
 	}
 	if *addr != "" {
 		cfg.HTTPAddr = *addr
-		if cfg.InternalAddr == cfg.HTTPAddr {
-			cfg.InternalAddr = ""
-		}
 	}
 	// 内部回调端口对外监听且没有共享密钥时，直接拒绝启动：
 	// 继续跑下去等于把推流鉴权暴露给整个网段。

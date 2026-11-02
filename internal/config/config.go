@@ -109,9 +109,10 @@ func Load() (*Config, error) {
 	if strings.TrimSpace(cfg.HTTPAddr) == "" {
 		return nil, fmt.Errorf("config: HTTP_ADDR 不能为空")
 	}
-	// 配置成同一个地址时没有独立监听的意义，按“未启用”处理，避免回调路由被误删。
-	if cfg.InternalAddr == cfg.HTTPAddr {
-		cfg.InternalAddr = ""
+	// 显式把内部回调端口配成公网端口，等于把 /internal/ 路由重新挂回公网。
+	// 想共用端口就留空 INTERNAL_ADDR；显式相同地址视为配置错误，启动直接失败。
+	if cfg.InternalAddr != "" && SameListenAddr(cfg.InternalAddr, cfg.HTTPAddr) {
+		return nil, fmt.Errorf("config: INTERNAL_ADDR=%s 与 HTTP_ADDR=%s 指向同一个监听地址；这会把内部回调暴露在公网端口。请改用独立端口（例如 127.0.0.1:18856），或留空 INTERNAL_ADDR 表示共用端口", cfg.InternalAddr, cfg.HTTPAddr)
 	}
 	if cfg.RoomGrace <= 0 {
 		return nil, fmt.Errorf("config: ROOM_GRACE 必须为正数，当前为 %s", cfg.RoomGrace)
@@ -164,6 +165,33 @@ func Load() (*Config, error) {
 	cfg.TrustedProxies = trusted
 
 	return cfg, nil
+}
+
+// SameListenAddr 判断两个监听地址是否指向同一个 TCP 端点。
+//
+// 空主机名、0.0.0.0 与 :: 都表示“所有网卡”，视为同一个通配地址；
+// 端口必须相同。地址格式非法时返回 false，交给后续的 Listen 报出更准确的错误。
+func SameListenAddr(a, b string) bool {
+	aHost, aPort, aErr := net.SplitHostPort(a)
+	bHost, bPort, bErr := net.SplitHostPort(b)
+	if aErr != nil || bErr != nil || aPort != bPort {
+		return false
+	}
+	return normalizeListenHost(aHost) == normalizeListenHost(bHost)
+}
+
+func normalizeListenHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		if ip.IsUnspecified() {
+			return ""
+		}
+		return ip.String()
+	}
+	return strings.ToLower(host)
 }
 
 func parseCIDRs(key string, def []string) ([]*net.IPNet, error) {

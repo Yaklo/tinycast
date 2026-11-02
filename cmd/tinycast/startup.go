@@ -24,6 +24,9 @@ func validateInternalAddr(cfg *config.Config) error {
 	if _, _, err := net.SplitHostPort(cfg.InternalAddr); err != nil {
 		return fmt.Errorf("config: INTERNAL_ADDR=%q 不是合法的 host:port 形式：%w", cfg.InternalAddr, err)
 	}
+	if config.SameListenAddr(cfg.InternalAddr, cfg.HTTPAddr) {
+		return fmt.Errorf("config: INTERNAL_ADDR=%s 与 HTTP_ADDR=%s 指向同一个监听地址；这会把内部回调暴露在公网端口。请改用独立端口（例如 127.0.0.1:18856），或留空 INTERNAL_ADDR 表示共用端口", cfg.InternalAddr, cfg.HTTPAddr)
+	}
 	if isLoopbackListenAddr(cfg.InternalAddr) {
 		return nil
 	}

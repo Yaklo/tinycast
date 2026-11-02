@@ -69,17 +69,35 @@ func TestLoadInternalAddr(t *testing.T) {
 	}
 }
 
-func TestLoadInternalAddrEqualToHTTPIsDisabled(t *testing.T) {
+func TestLoadInternalAddrEqualToHTTPIsRejected(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("HTTP_ADDR", "127.0.0.1:18855")
 	t.Setenv("INTERNAL_ADDR", "127.0.0.1:18855")
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if _, err := Load(); err == nil {
+		t.Fatal("显式把 INTERNAL_ADDR 配成 HTTP_ADDR 应拒绝启动")
+	} else if !strings.Contains(err.Error(), "同一个监听地址") {
+		t.Fatalf("错误信息应说明地址冲突，实际 %v", err)
 	}
-	if cfg.InternalAddr != "" {
-		t.Fatalf("与 HTTP_ADDR 相同时应按未启用处理，实际 %q", cfg.InternalAddr)
+}
+
+func TestSameListenAddr(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"127.0.0.1:18855", "127.0.0.1:18855", true},
+		{"127.0.0.1:18855", "127.0.0.1:18856", false},
+		{":18855", "0.0.0.0:18855", true},
+		{"0.0.0.0:18855", "[::]:18855", true},
+		{"[::1]:18855", "[::1]:18855", true},
+		{"localhost:18855", "127.0.0.1:18855", false},
+		{"127.0.0.1", "127.0.0.1:18855", false},
+	}
+	for _, tc := range cases {
+		if got := SameListenAddr(tc.a, tc.b); got != tc.want {
+			t.Fatalf("SameListenAddr(%q, %q) = %v，期望 %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
 
