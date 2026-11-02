@@ -1201,6 +1201,19 @@ function retry(): void {
   }, 300)
 }
 
+/**
+ * 刷新播放：丢掉当前的 HLS / WebRTC 会话，重新向后端要一次播放地址。
+ * 只重建播放器，不刷新整个页面，所以统计面板与全屏状态都还在。
+ */
+function refreshPlayback(): void {
+  autoSwitchNote.value = ''
+  controlNote.value = ''
+  fallbackNotice = ''
+  engineNotice.value = ''
+  if (props.room.state === 'LIVE') void start()
+  else retry()
+}
+
 /** 鼠标 / 手指一动就重新计时；播放中静止 2.5 秒收起控制条。 */
 function pokeControls(): void {
   controlsVisible.value = true
@@ -1473,6 +1486,9 @@ onBeforeUnmount(() => {
           @click="toggleStats"
         >
           🩺
+        </button>
+        <button type="button" class="ctrl" title="刷新播放" aria-label="刷新播放" @click="refreshPlayback">
+          ↻
         </button>
         <button type="button" class="ctrl" :class="{ on: muted }" :title="muted ? '取消静音' : '静音'" @click="toggleMute">
           {{ muted ? '🔇' : '🔊' }}

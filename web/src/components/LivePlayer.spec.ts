@@ -236,6 +236,25 @@ describe('LivePlayer', () => {
     expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
   })
 
+  it('刷新按钮会重建播放器并重新拉取播放地址', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    expect(fetchPlayMock).toHaveBeenCalledTimes(1)
+    expect(hlsLog.loadSource).toHaveLength(1)
+
+    const refresh = buttonByTitle(wrapper, '刷新播放')
+    expect(refresh).toBeTruthy()
+    await refresh?.trigger('click')
+    await flushPromises()
+
+    expect(fetchPlayMock).toHaveBeenCalledTimes(2)
+    expect(hlsLog.destroyed).toBe(1)
+    expect(hlsLog.instances).toHaveLength(2)
+    expect(hlsLog.loadSource).toHaveLength(2)
+  })
+
   it('HLS 通道用分片数据算码率，不展示 RTT 与丢包', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
