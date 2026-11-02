@@ -221,6 +221,8 @@ let controlsTimer: ReturnType<typeof setTimeout> | null = null
 const latencySec = ref(0)
 /** 从 WebRTC 通道自动回退到 LL-HLS 时的说明条。 */
 const autoSwitchNote = ref('')
+/** 全屏 / 画中画不可用等一次性操作提示。 */
+const controlNote = ref('')
 
 const HISTORY_LIMIT = 60
 
@@ -262,6 +264,9 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null
 /** 网络错误重试计数与定时器：断流时 hls.js 会立刻失败，必须自己退避。 */
 let networkRetryTimer: ReturnType<typeof setTimeout> | null = null
 let networkRetries = 0
+/** 原生 <video> 的监听器：切档/重连必须摘掉，否则旧会话的错误会打到新会话上。 */
+let nativeErrorHandler: (() => void) | null = null
+let nativeMetaHandler: (() => void) | null = null
 /** 解码错误重试次数：编码确实不支持时 recoverMediaError 只会无限黑屏。 */
 let mediaRetries = 0
 let lastFrameAt = 0
@@ -311,6 +316,11 @@ const metrics = computed(() =>
     return true
   }),
 )
+
+// 切换通道后，当前选中的指标可能在新通道里不存在（例如 HLS 没有 RTT），回落到下载速率。
+watch(metrics, (list) => {
+  if (!list.some((item) => item.key === metric.value)) metric.value = 'kbps'
+})
 
 const chartPath = computed(() => {
   const values = history.value.map((item) => valueOf(item, metric.value))
@@ -366,7 +376,9 @@ const grid = computed(() => {
         mode.value === 'hls'
           ? phase.value === 'playing'
             ? '播放中'
-            : '缓冲中'
+            : phase.value === 'error'
+              ? '播放出错'
+              : '缓冲中'
           : labelOrDash(connState.value),
     },
   )
@@ -436,6 +448,16 @@ function formatNumber(value: number): string {
   return String(rounded)
 }
 
+function clearNativeHandlers(video?: HTMLVideoElement | null): void {
+  const el = video ?? videoEl.value
+  if (el) {
+    if (nativeErrorHandler) el.removeEventListener('error', nativeErrorHandler)
+    if (nativeMetaHandler) el.removeEventListener('loadedmetadata', nativeMetaHandler)
+  }
+  nativeErrorHandler = null
+  nativeMetaHandler = null
+}
+
 function teardown(): void {
   if (controlsTimer !== null) {
     clearTimeout(controlsTimer)
@@ -477,9 +499,12 @@ function teardown(): void {
   }
   const video = videoEl.value
   if (video) {
+    clearNativeHandlers(video)
     video.pause()
     video.removeAttribute('src')
     video.srcObject = null
+    // 走过 HLS.js 会把 disableRemotePlayback 置为 true；切回原生时要还回 AirPlay。
+    ;(video as HTMLVideoElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = false
     video.load()
   }
   connState.value = ''
@@ -490,6 +515,15 @@ function teardown(): void {
 function fail(message: string): void {
   phase.value = 'error'
   errorText.value = message
+  // 进入错误态后不再采样：播放器可能已经被销毁，继续轮询只会读到空数据。
+  if (monitorTimer !== null) {
+    clearInterval(monitorTimer)
+    monitorTimer = null
+  }
+  // 面板里的码率、帧率都是死数据了，清空比让用户盯着冻结的数字好。
+  sample.value = null
+  history.value = []
+  latencySec.value = 0
 }
 
 async function start(): Promise<void> {
@@ -546,7 +580,7 @@ async function start(): Promise<void> {
 async function load(token: number): Promise<void> {
   if (mode.value === 'hls') await startHLS(token)
   else await startWebRTC(token)
-  if (token !== generation) return
+  if (token !== generation || phase.value === 'error') return
   startMonitor(token)
   armWatchdog(token)
 }
@@ -618,15 +652,18 @@ async function startHLS(token: number): Promise<void> {
     video.src = url
     // 原生管线不给分片信息，只能自己去读清单区分 LL-HLS 与普通 HLS。
     void probeDelivery(url, token)
-    video.addEventListener('error', onNativeError, { once: true })
-    video.addEventListener(
-      'loadedmetadata',
-      () => {
-        seekLive()
-        void video.play().catch(() => {})
-      },
-      { once: true },
-    )
+    clearNativeHandlers(video)
+    nativeErrorHandler = () => {
+      if (token !== generation) return
+      onNativeError()
+    }
+    nativeMetaHandler = () => {
+      if (token !== generation) return
+      seekLive()
+      void video.play().catch(() => {})
+    }
+    video.addEventListener('error', nativeErrorHandler, { once: true })
+    video.addEventListener('loadedmetadata', nativeMetaHandler, { once: true })
     // 不要在这里把 phase 置成 playing：原生播放器同样可能只拉到清单却一帧都解不出来。
     // 真正的 playing 由 trackProgress 在 framesDecoded 增长时推进。
     return
@@ -681,8 +718,11 @@ async function startHLS(token: number): Promise<void> {
     const details = String(failure.details ?? data.details ?? '')
 
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      // 清单/分片 404 表示流已经不在 MediaMTX 里了，重试没有意义。
-      if (failure.response?.code === 404) {
+      // 只有清单 404 才说明流真的没了；LL-HLS 分片被淘汰时也会 404，不能直接判死。
+      if (
+        failure.response?.code === 404 &&
+        (details === 'manifestLoadError' || details === 'levelLoadError')
+      ) {
         fail('直播已经结束：服务器上找不到这个流了。')
         return
       }
@@ -999,9 +1039,15 @@ function hlsSample(now: number, prev: StatsSample | null): StatsSample {
   s.receivedBytes = hlsBytes
 
   const quality = video?.getVideoPlaybackQuality?.()
-  const total = Number(quality?.totalVideoFrames ?? 0)
-  const dropped = Number(quality?.droppedVideoFrames ?? 0)
-  s.framesDecoded = Math.max(0, total - dropped)
+  let dropped = 0
+  if (quality) {
+    const total = Number(quality.totalVideoFrames ?? 0)
+    dropped = Number(quality.droppedVideoFrames ?? 0)
+    s.framesDecoded = Math.max(0, total - dropped)
+  } else {
+    // 少数环境没有 getVideoPlaybackQuality；用 readyState 判断“确实出画了”。
+    s.framesDecoded = video && video.readyState >= 3 && video.currentTime > 0 ? 1 : 0
+  }
 
   const deltaDropped = Math.max(0, dropped - droppedTotal)
   droppedTotal = dropped
@@ -1050,7 +1096,7 @@ function trackProgress(next: StatsSample, now: number): void {
 
   // WebRTC 连上 6 秒还一帧都没有：MediaMTX 多半已经因为 B 帧把会话关掉了。
   // 与其让观众盯着黑屏，不如自动切回 LL-HLS。
-  if (mode.value === 'webrtc' && webrtcSince > 0 && frames === 0 && now - webrtcSince > 6000) {
+  if (mode.value === 'webrtc' && phase.value !== 'error' && webrtcSince > 0 && frames === 0 && now - webrtcSince > 6000) {
     autoFallbackFromWebRTC('WebRTC 通道 6 秒内没有收到画面')
   }
 }
@@ -1139,8 +1185,8 @@ function setEngine(next: EnginePref): void {
 function fallbackToNative(): boolean {
   if (engineFallbackTried || enginePref.value === 'native' || !canUseNative()) return false
   engineFallbackTried = true
+  // 只对本次会话生效：下次仍然先按用户保存的偏好（通常还是自动）来。
   enginePref.value = 'native'
-  saveEnginePref('native')
   fallbackNotice = 'HLS.js 解不了当前编码，已自动改用浏览器原生播放器。'
   engineNotice.value = fallbackNotice
   retry()
@@ -1193,23 +1239,59 @@ function onKeydown(event: KeyboardEvent): void {
 
 async function toggleFullscreen(): Promise<void> {
   const stage = stageEl.value
+  const video = videoEl.value as
+    | (HTMLVideoElement & { webkitEnterFullscreen?: () => void })
+    | null
   if (!stage) return
+  controlNote.value = ''
   try {
-    if (document.fullscreenElement) await document.exitFullscreen()
-    else await stage.requestFullscreen()
+    if (document.fullscreenElement) {
+      await document.exitFullscreen()
+      return
+    }
+    if (typeof stage.requestFullscreen === 'function') {
+      await stage.requestFullscreen()
+      return
+    }
+    // iPhone 的 Safari 没有 Element.requestFullscreen，只能走视频自身的全屏。
+    if (video && typeof video.webkitEnterFullscreen === 'function') {
+      video.webkitEnterFullscreen()
+      return
+    }
+    controlNote.value = '当前浏览器不支持网页全屏，可以试试双击画面或旋转屏幕。'
   } catch {
-    // 浏览器拒绝（例如 iframe 未授权）时保持原样
+    controlNote.value = '浏览器拒绝进入全屏（可能是在 iframe 里或权限被限制）。'
   }
 }
 
 async function togglePip(): Promise<void> {
-  const video = videoEl.value
+  const video = videoEl.value as
+    | (HTMLVideoElement & {
+        webkitSetPresentationMode?: (mode: 'picture-in-picture' | 'inline') => void
+        webkitPresentationMode?: string
+      })
+    | null
   if (!video) return
+  controlNote.value = ''
   try {
-    if (document.pictureInPictureElement) await document.exitPictureInPicture()
-    else await video.requestPictureInPicture()
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture()
+      return
+    }
+    if (typeof video.requestPictureInPicture === 'function') {
+      await video.requestPictureInPicture()
+      return
+    }
+    // Safari 走私有 API；没有 API 时明确告诉用户，而不是静默失败。
+    if (typeof video.webkitSetPresentationMode === 'function') {
+      video.webkitSetPresentationMode(
+        video.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture',
+      )
+      return
+    }
+    controlNote.value = '当前浏览器不支持画中画。'
   } catch {
-    // 不支持画中画时忽略
+    controlNote.value = '当前浏览器不支持画中画。'
   }
 }
 
@@ -1258,7 +1340,7 @@ onBeforeUnmount(() => {
       ref="stageEl"
       class="player"
       :class="['mode-' + mode, { 'is-theater': theater }]"
-      @dblclick="onStageDoubleClick"
+      @dblclick.self="onStageDoubleClick"
       @mousemove="pokeControls"
       @touchstart.passive="pokeControls"
       @mouseleave="hideControls"
@@ -1305,6 +1387,11 @@ onBeforeUnmount(() => {
       <p v-if="autoSwitchNote" class="stall-chip auto-chip">
         <span>{{ autoSwitchNote }}</span>
         <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
+      </p>
+
+      <p v-if="controlNote" class="stall-chip control-chip">
+        <span>{{ controlNote }}</span>
+        <button type="button" class="chip-btn" @click="controlNote = ''">知道了</button>
       </p>
 
       <p v-if="issue && issue.level === 'error'" class="codec-hint">
@@ -1496,6 +1583,9 @@ onBeforeUnmount(() => {
             已关闭 LL-HLS：按整段分片缓冲，延迟升到十几秒，换来弱网下不卡。
           </template>
         </p>
+        <p v-else class="stats-note">
+          WebRTC 直接收 RTP：这里的「缓冲余量」实际是接收端的抖动缓冲，和 HLS 的分片缓冲不是一回事。
+        </p>
       </div>
     </aside>
   </div>
@@ -1654,6 +1744,16 @@ onBeforeUnmount(() => {
 }
 
 .auto-chip {
+  top: 52px;
+  bottom: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.control-chip {
+  top: 96px;
+  bottom: auto;
   display: flex;
   align-items: flex-start;
   gap: 10px;

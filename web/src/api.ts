@@ -74,5 +74,9 @@ export function postWatch(username: string, viewerId: string): Promise<{ room: u
 /** 主动离开房间时调用，人数立刻减一，不用等心跳超时。 */
 export function deleteWatch(username: string, viewerId: string): Promise<void> {
   const query = '?viewerId=' + encodeURIComponent(viewerId)
-  return request<void>('/api/rooms/' + encodeURIComponent(username) + '/watch' + query, { method: 'DELETE' })
+  // keepalive 让 pagehide / 关闭标签页时的请求不被浏览器直接丢弃。
+  return request<void>('/api/rooms/' + encodeURIComponent(username) + '/watch' + query, {
+    method: 'DELETE',
+    keepalive: true,
+  })
 }

@@ -1,5 +1,5 @@
 import { onBeforeUnmount, ref } from 'vue'
-import { deleteWatch, postWatch } from '../api'
+import { ApiError, deleteWatch, postWatch } from '../api'
 
 /**
  * 观看心跳。
@@ -16,8 +16,10 @@ const STORAGE_KEY = 'tinycast.viewerId'
 
 /** 心跳间隔：远小于后端默认的 30 秒超时，允许丢一两次。 */
 const HEARTBEAT_MS = 10_000
-/** 标签页切到后台时降频，避免无谓的请求。 */
-const HIDDEN_HEARTBEAT_MS = 30_000
+/** 标签页切到后台后仍按 10 秒心跳，避免被后端 30 秒超时清理。 */
+const HIDDEN_HEARTBEAT_MS = 10_000
+/** 房间已释放时不要彻底放弃：同名房间重新开播后应能自动恢复计数。 */
+const RELEASED_RETRY_MS = 30_000
 
 export function viewerId(): string {
   try {
@@ -62,6 +64,7 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
 
   let timer: ReturnType<typeof setTimeout> | null = null
   let current = ''
+  let released = false
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -72,7 +75,11 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
 
   function schedule(): void {
     clearTimer()
-    const delay = typeof document !== 'undefined' && document.hidden ? Math.max(interval, HIDDEN_HEARTBEAT_MS) : interval
+    const delay = released
+      ? RELEASED_RETRY_MS
+      : typeof document !== 'undefined' && document.hidden
+        ? Math.max(interval, HIDDEN_HEARTBEAT_MS)
+        : interval
     timer = setTimeout(tick, delay)
   }
 
@@ -82,8 +89,11 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
     if (!user) return
     try {
       await postWatch(user, id)
-    } catch {
-      // 房间可能刚被释放，失败不打断心跳循环，下一轮再试
+      released = false
+    } catch (err) {
+      // 房间释放（404）时降频重试：主播用同名房间重开播后还能自动恢复计数。
+      // 网络抖动等其它错误保持正常间隔。
+      if (err instanceof ApiError && err.status === 404) released = true
     }
     if (active.value && current === user) schedule()
   }
@@ -91,9 +101,10 @@ export function useWatch(username: () => string, options: WatchOptions = {}) {
   function start(): void {
     const user = username()
     if (!user) return
-    if (active.value && current === user) return
+    if (active.value && current === user && !released) return
     stop()
     current = user
+    released = false
     active.value = true
     void tick()
   }

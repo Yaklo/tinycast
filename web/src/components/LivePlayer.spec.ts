@@ -419,7 +419,8 @@ describe('LivePlayer', () => {
     hlsLog.emit('hlsError', { fatal: true, type: 'mediaError', details: 'bufferAddCodecError' })
     await vi.advanceTimersByTimeAsync(400)
     await flushPromises()
-    expect(localStorage.getItem('tinycast.hlsEngine')).toBe('native')
+    // 自动降级只对本次会话生效，不能把用户的偏好永久钉在原生引擎上。
+    expect(localStorage.getItem('tinycast.hlsEngine')).toBeNull()
     expect(wrapper.find('.engine-notice').text()).toContain('原生播放器')
   })
 

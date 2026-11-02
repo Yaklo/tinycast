@@ -34,6 +34,8 @@ export const roomsState = readonly(state)
 
 let source: EventSource | null = null
 let reconnectTimer: number | null = null
+let fallbackTimer: number | null = null
+let reconnectAttempts = 0
 let started = false
 
 /** 以服务器时间为准的"现在"，用于倒计时，避免本机时钟漂移。 */
@@ -50,12 +52,34 @@ function applySnapshot(snap: Snapshot): void {
   state.loaded = true
 }
 
+/** SSE 断开时按 3s、6s、12s… 退避重连，避免服务端 503 时打满请求。 */
 function scheduleReconnect(): void {
   if (reconnectTimer !== null) return
+  const base = Math.min(30_000, 3000 * 2 ** reconnectAttempts)
+  const delay = base + Math.floor(Math.random() * 500)
+  reconnectAttempts += 1
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null
     connect()
-  }, 3000)
+  }, delay)
+}
+
+/** EventSource 被 503 拦住时不会暴露状态码，用低频 REST 轮询兜底，保证界面还能更新。 */
+function scheduleFallback(): void {
+  if (fallbackTimer !== null) return
+  fallbackTimer = window.setTimeout(async () => {
+    fallbackTimer = null
+    if (state.connected) return
+    await refreshRooms()
+    scheduleFallback()
+  }, 15_000)
+}
+
+function stopFallback(): void {
+  if (fallbackTimer !== null) {
+    clearTimeout(fallbackTimer)
+    fallbackTimer = null
+  }
 }
 
 function closeSource(): void {
@@ -79,6 +103,8 @@ function connect(): void {
   es.addEventListener('open', () => {
     state.connected = true
     state.error = ''
+    reconnectAttempts = 0
+    stopFallback()
   })
 
   es.addEventListener('rooms', (event) => {
@@ -94,11 +120,13 @@ function connect(): void {
 
   es.addEventListener('error', () => {
     state.connected = false
-    // EventSource 自己会重连；只有彻底关闭时才需要我们接管重试
+    state.error = '实时连接中断，正在重试'
+    // EventSource 自己会重连；彻底关闭时由我们退避接管，未关闭时用 REST 兜底。
     if (es.readyState === EventSource.CLOSED) {
       closeSource()
       scheduleReconnect()
     }
+    scheduleFallback()
   })
 }
 
@@ -108,9 +136,12 @@ export async function refreshRooms(): Promise<void> {
     const data = await fetchRooms()
     state.rooms = data.rooms ?? []
     state.graceSeconds = data.graceSeconds || state.graceSeconds
-    state.offset = data.serverTime - Date.now()
+    if (typeof data.serverTime === 'number' && data.serverTime > 0) {
+      state.offset = data.serverTime - Date.now()
+    }
     state.loaded = true
-    state.error = ''
+    // 不要在这里清掉 SSE 的错误提示：REST 兜底成功不代表实时连接已经恢复。
+    if (state.connected) state.error = ''
   } catch (err) {
     state.error = err instanceof Error ? err.message : '获取房间列表失败'
     state.loaded = true
@@ -133,6 +164,7 @@ export function startRooms(): void {
   void refreshRooms()
   void loadConfig()
   connect()
+  scheduleFallback()
 }
 
 export function findRoom(username: string): RoomView | undefined {

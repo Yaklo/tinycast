@@ -98,7 +98,11 @@ watch(username, () => {
 watch(
   () => room.value?.state,
   (state, prev) => {
-    if (state && state !== prev) void loadMedia()
+    if (state && state !== prev) {
+      void loadMedia()
+      // 房间释放后心跳会降频；同名房间重新开播时立刻补一拍，人数不用等 30 秒。
+      if (state === 'LIVE') viewerWatch.start()
+    }
   },
 )
 
@@ -187,8 +191,8 @@ watch(
     </template>
 
     <div v-else class="state-panel">
-      <h2>房间已释放</h2>
-      <p>断流超过保留时间后，房间与用户名已自动释放。请让主播重新推流，或回到首页看看其他房间。</p>
+      <h2>{{ fetchError ? '房间加载失败' : '房间已释放' }}</h2>
+      <p>{{ fetchError || '断流超过保留时间后，房间与用户名已自动释放。请让主播重新推流，或回到首页看看其他房间。' }}</p>
       <RouterLink to="/" class="btn btn-primary">返回首页</RouterLink>
     </div>
   </div>
