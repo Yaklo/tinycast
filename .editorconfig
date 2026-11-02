@@ -1,0 +1,35 @@
+root = true
+
+# 默认使用 UTF-8、LF 与两个空格；与 .gitattributes 保持一致。
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go 源码使用制表符缩进，制表宽度按 4 个字符显示。
+[*.go]
+indent_style = tab
+indent_size = 4
+
+# Windows 脚本与配置文件必须保持 CRLF，否则 cmd.exe 可能无法正确执行。
+[*.{cmd,ps1}]
+end_of_line = crlf
+indent_size = 2
+
+[deploy/windows/*.env]
+end_of_line = crlf
+
+[deploy/windows/*.txt]
+end_of_line = crlf
+charset = utf-8
+
+# Markdown 常用行尾双空格表示换行，不要自动删除。
+[*.md]
+trim_trailing_whitespace = false
+
+# 前端与配置文件沿用默认的两空格。
+[*.{ts,js,vue,css,html,json,yml,yaml}]
+indent_size = 2
