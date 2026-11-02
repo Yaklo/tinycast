@@ -236,6 +236,51 @@ describe('LivePlayer', () => {
     expect(wrapper.findAll('.mode-btn')[0].classes()).toContain('active')
   })
 
+  it('右侧控件按刷新、设置、统计、音量、小窗、网页全屏、全屏排列', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const titles = wrapper.findAll('.controls .ctrl').map((node) => node.attributes('title'))
+    expect(titles).toEqual([
+      '刷新播放',
+      '播放参数',
+      '显示播放统计',
+      '取消静音',
+      '小窗（画中画）',
+      '网页全屏',
+      '全屏',
+    ])
+  })
+
+  it('音量条可以调音量，静音按钮能恢复原音量', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const video = wrapper.find('video').element as HTMLVideoElement
+    const slider = wrapper.find('.volume-slider')
+    expect(video.muted).toBe(true)
+    expect((slider.element as HTMLInputElement).value).toBe('0')
+
+    await slider.setValue('0.35')
+    await flushPromises()
+
+    expect(video.muted).toBe(false)
+    expect(video.volume).toBeCloseTo(0.35)
+    expect(slider.attributes('title')).toBe('音量 35%')
+
+    await buttonByTitle(wrapper, '静音')?.trigger('click')
+    await flushPromises()
+    expect(video.muted).toBe(true)
+    expect((slider.element as HTMLInputElement).value).toBe('0')
+
+    await buttonByTitle(wrapper, '取消静音')?.trigger('click')
+    await flushPromises()
+    expect(video.muted).toBe(false)
+    expect(video.volume).toBeCloseTo(0.35)
+  })
+
   it('刷新按钮会重建播放器并重新拉取播放地址', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
@@ -349,13 +394,17 @@ describe('LivePlayer', () => {
     await vi.advanceTimersByTimeAsync(1100)
     await flushPromises()
 
-    const chip = wrapper.find('.latency-chip')
+    // 控制栏不再显示「延迟 X s · 追平」。
+    expect(wrapper.find('.controls .latency-chip').exists()).toBe(false)
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const stats = wrapper.find('.stats')
+    expect(stats.text()).toContain('直播延迟')
+    const chip = stats.find('.stats-latency')
     expect(chip.exists()).toBe(true)
     expect(chip.text()).toContain('3.4')
-
-    await wrapper.find('.ctrl[title=' + JSON.stringify('显示播放统计') + ']').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('.stats').text()).toContain('直播延迟')
 
     await chip.trigger('click')
     await flushPromises()

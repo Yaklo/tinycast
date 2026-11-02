@@ -212,6 +212,9 @@ const engineHint = computed(() =>
 )
 
 const muted = ref(true)
+/** 静音前的音量；滑块拖到 0 也算静音，但记住原来的值方便恢复。 */
+const volume = ref(1)
+const volumePercent = computed(() => Math.round((muted.value ? 0 : volume.value) * 100))
 const theater = ref(false)
 const showStats = ref(false)
 /** 控制条是否显示：播放中鼠标静止 2.5 秒自动收起，动一下鼠标再出来。 */
@@ -630,7 +633,7 @@ async function startHLS(token: number): Promise<void> {
     return
   }
 
-  video.muted = muted.value
+  applyVolume(video)
 
   // 引擎选择：Chromium 的 canPlayType 对 HLS 也返回 "maybe"，但它没有真正的 HLS
   // 管线（会退化成整段下载、延迟十几秒），所以把 Chromium 排除在「原生」之外。
@@ -852,7 +855,7 @@ async function startWebRTC(token: number): Promise<void> {
     if (!video) return
     const stream = event.streams[0] ?? new MediaStream([event.track])
     video.srcObject = stream
-    video.muted = muted.value
+    applyVolume(video)
     void video.play().catch(() => {})
   }
 
@@ -1230,10 +1233,30 @@ function hideControls(): void {
   if (phase.value === 'playing') controlsVisible.value = false
 }
 
+/** 把当前音量/静音状态写到 <video> 上：新起的 HLS / WebRTC 会话也要沿用。 */
+function applyVolume(video?: HTMLVideoElement | null): void {
+  const target = video ?? videoEl.value
+  if (!target) return
+  target.volume = volume.value
+  target.muted = muted.value || volume.value === 0
+}
+
 function toggleMute(): void {
-  muted.value = !muted.value
-  const video = videoEl.value
-  if (video) video.muted = muted.value
+  if (muted.value || volume.value === 0) {
+    muted.value = false
+    if (volume.value === 0) volume.value = 1
+  } else {
+    muted.value = true
+  }
+  applyVolume()
+}
+
+function onVolumeInput(event: Event): void {
+  const raw = Number((event.target as HTMLInputElement).value)
+  if (!Number.isFinite(raw)) return
+  volume.value = Math.min(1, Math.max(0, raw))
+  muted.value = volume.value === 0
+  applyVolume()
 }
 
 function toggleStats(): void {
@@ -1457,18 +1480,11 @@ onBeforeUnmount(() => {
 
         <span class="media-chip" :title="describeMedia(props.media)">{{ describeMedia(props.media) || '编码未知' }}</span>
 
-        <button
-          v-if="mode === 'hls' && latencySec >= 2"
-          type="button"
-          class="latency-chip"
-          title="画面落后于直播，点一下追到最新"
-          @click="seekLive"
-        >
-          延迟 {{ latencySec.toFixed(1) }}s · 追平
-        </button>
-
         <div class="spacer"></div>
 
+        <button type="button" class="ctrl" title="刷新播放" aria-label="刷新播放" @click="refreshPlayback">
+          ↻
+        </button>
         <button
           type="button"
           class="ctrl"
@@ -1487,15 +1503,33 @@ onBeforeUnmount(() => {
         >
           🩺
         </button>
-        <button type="button" class="ctrl" title="刷新播放" aria-label="刷新播放" @click="refreshPlayback">
-          ↻
-        </button>
-        <button type="button" class="ctrl" :class="{ on: muted }" :title="muted ? '取消静音' : '静音'" @click="toggleMute">
-          {{ muted ? '🔇' : '🔊' }}
-        </button>
+        <div class="volume-control">
+          <button
+            type="button"
+            class="ctrl"
+            :class="{ on: muted }"
+            :title="muted ? '取消静音' : '静音'"
+            :aria-label="muted ? '取消静音' : '静音'"
+            @click="toggleMute"
+          >
+            {{ muted ? '🔇' : '🔊' }}
+          </button>
+          <input
+            class="volume-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            :value="muted ? 0 : volume"
+            :title="'音量 ' + volumePercent + '%'"
+            :aria-valuetext="volumePercent + '%'"
+            aria-label="音量"
+            @input="onVolumeInput"
+          />
+        </div>
+        <button type="button" class="ctrl" title="小窗（画中画）" @click="togglePip">⧉</button>
         <button type="button" class="ctrl" :class="{ on: theater }" title="网页全屏" @click="toggleTheater">⛶</button>
         <button type="button" class="ctrl" title="全屏" @click="toggleFullscreen">⤢</button>
-        <button type="button" class="ctrl" title="画中画" @click="togglePip">⧉</button>
       </div>
 
     </div>
@@ -1581,6 +1615,15 @@ onBeforeUnmount(() => {
 
       <div class="stats-facts">
         <p v-if="engineNotice" class="stats-note engine-notice">{{ engineNotice }}</p>
+        <button
+          v-if="mode === 'hls' && latencySec >= 2"
+          type="button"
+          class="latency-chip stats-latency"
+          title="画面落后于直播，点一下追到最新"
+          @click="seekLive"
+        >
+          延迟 {{ latencySec.toFixed(1) }}s · 追平
+        </button>
         <dl class="stats-grid">
           <template v-for="row in grid" :key="row.label">
             <dt>{{ row.label }}</dt>
@@ -1757,6 +1800,71 @@ onBeforeUnmount(() => {
 
 .latency-chip:hover {
   background: rgba(146, 64, 14, 0.95);
+}
+
+/* 播放统计里的「延迟 X s · 追平」：只在这里出现，控制栏不再放。 */
+.stats-latency {
+  margin: 0 0 12px;
+}
+
+.volume-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.volume-slider {
+  width: 64px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.volume-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.volume-slider::-webkit-slider-thumb {
+  width: 11px;
+  height: 11px;
+  margin-top: -3.5px;
+  border: none;
+  border-radius: 50%;
+  background: #c7d2fe;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.volume-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.volume-slider::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: none;
+  border-radius: 50%;
+  background: #c7d2fe;
+}
+
+.volume-slider:focus-visible {
+  outline: 2px solid rgba(129, 140, 248, 0.7);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .volume-slider {
+    width: 48px;
+  }
 }
 
 .auto-chip {
