@@ -32,8 +32,22 @@ func checkMTXCallback(ctx context.Context, client *mtx.Client, logger *slog.Logg
 	}
 	if problem := callbackPortProblem(addr, httpAddr); problem != "" {
 		logger.Error("MediaMTX 鉴权回调地址与 TinyCast 监听地址不一致",
-			"authHTTPAddress", addr, "httpAddr", httpAddr, "hint", problem)
+			"authHTTPAddress", addr, "listenAddr", httpAddr, "hint", problem)
 	}
+}
+
+// isLoopbackListenAddr 判断监听地址是否只绑定回环。
+// 空主机名（例如 ":18856"）表示所有网卡，不算回环。
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(strings.Trim(host, "[]"), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // callbackPortProblem 只比较端口：容器部署时主机名是服务名（tinycast），
@@ -56,7 +70,7 @@ func callbackPortProblem(authAddr, httpAddr string) string {
 		}
 	}
 	if gotPort != wantPort {
-		return fmt.Sprintf("MediaMTX 会回调 %s，但 TinyCast 监听在 %s；请把 mediamtx.yml 的 authHTTPAddress 改成与 HTTP_ADDR 相同的端口", gotPort, wantPort)
+		return fmt.Sprintf("MediaMTX 会回调 %s，但 TinyCast 监听在 %s；请把 mediamtx.yml 的 authHTTPAddress 改成与 HTTP_ADDR（单独配置时是 INTERNAL_ADDR）相同的端口", gotPort, wantPort)
 	}
 	return ""
 }

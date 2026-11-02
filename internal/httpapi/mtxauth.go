@@ -42,19 +42,19 @@ const maxMTXAuthBody = 64 << 10
 func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
 	remote := s.clientIP(r)
 	if !s.authSecretOK(r) {
-		s.log.Warn("拒绝来源不明的鉴权回调：共享密钥不匹配", "remote", remote, "path", r.URL.Path)
+		s.log.Error("拒绝来源不明的鉴权回调：共享密钥不匹配", "remote", remote, "path", r.URL.Path)
 		writeError(w, http.StatusUnauthorized, "invalid_secret", "鉴权回调密钥不正确")
 		return
 	}
 	// 没配密钥时不能接受任何转发请求：反向代理会让公网请求的 RemoteAddr
 	// 变成 127.0.0.1，从而伪装成本机回调。
 	if s.cfg.MediaMTX.AuthSecret == "" && hasForwardedHeader(r) {
-		s.log.Warn("拒绝经反向代理的鉴权回调：未配置 MEDIAMTX_AUTH_SECRET", "remote", remote)
+		s.log.Error("拒绝经反向代理的鉴权回调：未配置 MEDIAMTX_AUTH_SECRET", "remote", remote)
 		writeError(w, http.StatusForbidden, "secret_required", "经反向代理的鉴权回调必须配置共享密钥")
 		return
 	}
 	if !s.authIPAllowed(remote) {
-		s.log.Warn("拒绝公网来源的鉴权回调", "remote", remote)
+		s.log.Error("拒绝公网来源的鉴权回调", "remote", remote)
 		writeError(w, http.StatusForbidden, "ip_forbidden", "鉴权回调只允许内网来源")
 		return
 	}
@@ -75,7 +75,7 @@ func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
 		allowAuth(w)
 	default:
 		// MediaMTX 增加新 action 时默认拒绝，避免悄悄放行未知操作。
-		s.log.Warn("拒绝未知的鉴权 action", "action", payload.Action, "path", payload.Path)
+		s.log.Error("拒绝未知的鉴权 action", "action", payload.Action, "path", payload.Path)
 		writeError(w, http.StatusForbidden, "invalid_action", "未知的鉴权动作")
 	}
 }
@@ -84,7 +84,7 @@ func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authorizePublish(w http.ResponseWriter, payload mtxAuthPayload) {
 	app, username := mtx.SplitStreamName(payload.Path)
 	if app != s.cfg.MediaMTX.App {
-		s.log.Warn("推流路径不在配置的 app 下，已拒绝", "path", payload.Path, "app", s.cfg.MediaMTX.App)
+		s.log.Error("推流路径不在配置的 app 下，已拒绝", "path", payload.Path, "app", s.cfg.MediaMTX.App)
 		writeError(w, http.StatusForbidden, "invalid_path", "推流地址必须是 "+s.cfg.MediaMTX.App+"/<用户名>")
 		return
 	}
@@ -106,7 +106,7 @@ func (s *Server) authorizePublish(w http.ResponseWriter, payload mtxAuthPayload)
 		IP:        payload.IP,
 	})
 	if !result.Allowed {
-		s.log.Warn("推流鉴权失败", "username", username, "reason", string(result.Reason), "ip", payload.IP)
+		s.log.Error("推流鉴权失败", "username", username, "reason", string(result.Reason), "ip", payload.IP)
 		writeError(w, http.StatusUnauthorized, string(result.Reason), result.Message)
 		return
 	}

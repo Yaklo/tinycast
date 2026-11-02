@@ -17,6 +17,8 @@ import (
 const (
 	maxEventStreams      = 1024
 	maxEventStreamsPerIP = 16
+	// 单次写的上限：慢客户端不能永久占住 goroutine 与配额。
+	sseWriteTimeout = 30 * time.Second
 )
 
 // handleEvents 是一条长期保持的 SSE 连接。
@@ -44,10 +46,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
+	// SSE 没有 WriteTimeout 可依赖（连接本来就是长响应），只能每次写前刷新期限。
+	// 不支持 SetWriteDeadline 的连接（例如测试里的 ResponseRecorder）忽略即可。
+	controller := http.NewResponseController(w)
+	setDeadline := func() { _ = controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) }
+
 	snapshots, release := s.hub.Subscribe()
 	defer release()
 
 	// 断线后 3 秒重连，同时立即补一帧当前状态。
+	setDeadline()
 	if _, err := io.WriteString(w, "retry: 3000\n\n"); err != nil {
 		return
 	}
@@ -67,12 +75,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
+			setDeadline()
 			if err := writeSnapshot(w, snap); err != nil {
 				return
 			}
 			flusher.Flush()
 		case <-keepalive.C:
 			// 注释行不会被前端当作事件，只用来保活并探测断开。
+			setDeadline()
 			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
 				return
 			}

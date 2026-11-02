@@ -38,6 +38,15 @@ type Server struct {
 	// mediaSlots 限制同时进行中的 /hls/、/rtc/ 反代请求数。
 	// 慢客户端可以把一个流式响应挂很久，不设上限会吃光文件描述符。
 	mediaSlots chan struct{}
+	// mediaMu/mediaByIP 在全局槽之外再限制单 IP 的并发媒体请求：
+	// 否则一个人打开几百条慢连接就能让全站播放返回 503。
+	mediaMu   sync.Mutex
+	mediaByIP map[string]int
+
+	// watchLimiter/unwatchLimiter 分别限制观看与离开请求，
+	// 且按「房间 + 客户端」计数：一个人刷某个房间不应影响其它观众。
+	watchLimiter   *fixedWindowLimiter
+	unwatchLimiter *fixedWindowLimiter
 
 	// 观看人数变化可能每秒来很多次；把广播合并成最多每 100ms 一次，
 	// 避免一个廉价请求放大成对每个 SSE 订阅者的全量快照。
@@ -48,11 +57,14 @@ type Server struct {
 // New 创建 HTTP 服务。
 func New(h *hub.Hub, cfg *config.Config, log *slog.Logger) *Server {
 	s := &Server{
-		hub:        h,
-		cfg:        cfg,
-		log:        log,
-		eventsByIP: make(map[string]int),
-		mediaSlots: make(chan struct{}, 512),
+		hub:            h,
+		cfg:            cfg,
+		log:            log,
+		eventsByIP:     make(map[string]int),
+		mediaSlots:     make(chan struct{}, maxMediaConcurrent),
+		mediaByIP:      make(map[string]int),
+		watchLimiter:   newFixedWindowLimiter(240, 10*time.Second),
+		unwatchLimiter: newFixedWindowLimiter(240, 10*time.Second),
 	}
 
 	if cfg.MediaMTX.WHEPProxyTarget != "" {
@@ -85,8 +97,18 @@ func New(h *hub.Hub, cfg *config.Config, log *slog.Logger) *Server {
 	return s
 }
 
-// Handler 返回带中间件的根处理器。
+// Handler 返回带中间件的根处理器（公网端口）。
 func (s *Server) Handler() http.Handler { return s.mux }
+
+// InternalHandler 只暴露 MediaMTX 鉴权回调，供独立的内部监听端口使用。
+//
+// 这样反向代理只转发公网端口时，/internal/ 根本无法从外部到达；
+// 来源 IP 白名单与共享密钥仍作为第二道防线保留。
+func (s *Server) InternalHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /internal/mtx/auth", s.handleMTXAuth)
+	return s.recoverer(s.logger(s.securityHeaders(mux)))
+}
 
 // scheduleBroadcast 合并短时间内的多次状态变化。
 func (s *Server) scheduleBroadcast() {
@@ -116,8 +138,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/rooms/{username}/watch", s.handleUnwatch)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
-	// MediaMTX 的鉴权回调。默认只接受本机来源，可再加共享密钥，见 mtxauth.go。
-	mux.HandleFunc("POST /internal/mtx/auth", s.handleMTXAuth)
+	// MediaMTX 的鉴权回调。配置了 INTERNAL_ADDR 时改由内部端口独占，
+	// 公网端口连路由都不注册，反向代理不注入转发头也无法伪装成本机回调。
+	if s.cfg.InternalAddr == "" {
+		mux.HandleFunc("POST /internal/mtx/auth", s.handleMTXAuth)
+	}
 
 	// 未匹配的 /api 与 /internal 一律返回 JSON 404，避免被 SPA 回退误当成页面。
 	mux.HandleFunc("/api/", s.handleNotFound)
@@ -241,12 +266,22 @@ func (s *Server) mediaProxyHandler(proxy *httputil.ReverseProxy, prefix string) 
 		}
 		select {
 		case s.mediaSlots <- struct{}{}:
-			defer func() { <-s.mediaSlots }()
 		default:
 			w.Header().Set("Retry-After", "2")
 			writeError(w, http.StatusServiceUnavailable, "too_many_streams", "媒体请求过多，请稍后重试")
 			return
 		}
+		ip := eventStreamKey(s.clientIP(r))
+		if !s.acquireMediaSlot(ip) {
+			<-s.mediaSlots
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusServiceUnavailable, "too_many_streams", "该网络同时播放的媒体请求过多，请稍后重试")
+			return
+		}
+		defer func() {
+			s.releaseMediaSlot(ip)
+			<-s.mediaSlots
+		}()
 		proxy.ServeHTTP(w, r)
 	})
 }
@@ -255,6 +290,38 @@ func (s *Server) mediaProxyHandler(proxy *httputil.ReverseProxy, prefix string) 
 //
 // 不限 app 段时，HLS 代理一旦误配到 MediaMTX 的 API 端口，
 // /hls/v3/paths/list 就能直接读到控制接口。
+const (
+	// maxMediaConcurrent 是 /hls/ 与 /rtc/ 同时进行中的反代请求上限。
+	maxMediaConcurrent = 512
+	// maxMediaPerIP 是单个客户端（IPv6 收敛到 /64）的并发媒体请求上限。
+	// 不能压得太低：一个 LL-HLS 播放器会并发拉多个 0.2 秒分片，
+	// 同一 NAT 出口还可能有手机、平板、多个标签页。
+	maxMediaPerIP = 32
+)
+
+func (s *Server) acquireMediaSlot(ip string) bool {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	if s.mediaByIP == nil {
+		s.mediaByIP = make(map[string]int)
+	}
+	if s.mediaByIP[ip] >= maxMediaPerIP {
+		return false
+	}
+	s.mediaByIP[ip]++
+	return true
+}
+
+func (s *Server) releaseMediaSlot(ip string) {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	if n := s.mediaByIP[ip]; n > 1 {
+		s.mediaByIP[ip] = n - 1
+	} else {
+		delete(s.mediaByIP, ip)
+	}
+}
+
 func validMediaPath(p, prefix, app string) bool {
 	base := prefix + "/" + strings.Trim(app, "/") + "/"
 	if !strings.HasPrefix(p, base) {
@@ -264,6 +331,13 @@ func validMediaPath(p, prefix, app string) bool {
 	for _, segment := range strings.Split(rest, "/") {
 		if segment == ".." {
 			return false
+		}
+		// 控制字符（尤其是 %00）不能进入上游路径：它们不在 URL 的正常语境内，
+		// 还可能被某些日志或代理截断，造成路径校验与实际转发不一致。
+		for _, ch := range segment {
+			if ch < 0x20 || ch == 0x7f {
+				return false
+			}
 		}
 	}
 	return true

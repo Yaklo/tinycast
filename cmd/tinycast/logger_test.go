@@ -117,3 +117,16 @@ func TestParseLogLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownLogLevel(t *testing.T) {
+	for _, raw := range []string{"debug", " INFO ", "warn", "warning", "error"} {
+		if !knownLogLevel(raw) {
+			t.Fatalf("%q 应被识别", raw)
+		}
+	}
+	for _, raw := range []string{"", "nonsense", "trace"} {
+		if knownLogLevel(raw) {
+			t.Fatalf("%q 不应被识别", raw)
+		}
+	}
+}

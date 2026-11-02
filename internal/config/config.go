@@ -33,6 +33,10 @@ const (
 type Config struct {
 	// HTTPAddr 是 HTTP 服务监听地址，例如 ":18855"。
 	HTTPAddr string
+	// InternalAddr 是仅供 MediaMTX 回调的内部监听地址，例如 "127.0.0.1:18856"。
+	// 为空表示回调与 HTTPAddr 共用端口（兼容旧配置）；设置后公网端口不再注册
+	// /internal/ 路由，反向代理即使没有注入 X-Forwarded-For 也无法伪造回调。
+	InternalAddr string
 	// RoomGrace 是推流断开后房间保留时长（需求规定 5 分钟）。
 	RoomGrace time.Duration
 	// MonitorInterval 是房间状态巡检间隔（向 MediaMTX 拉取一次推流清单）。
@@ -83,6 +87,7 @@ type MediaMTXConfig struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		HTTPAddr:        envString("HTTP_ADDR", DefaultHTTPAddr),
+		InternalAddr:    envString("INTERNAL_ADDR", ""),
 		RoomGrace:       envDuration("ROOM_GRACE", DefaultRoomGrace),
 		MonitorInterval: envDuration("MONITOR_INTERVAL", DefaultMonitorInterval),
 		ViewerTimeout:   envDuration("VIEWER_TIMEOUT", DefaultViewerTimeout),
@@ -103,6 +108,10 @@ func Load() (*Config, error) {
 
 	if strings.TrimSpace(cfg.HTTPAddr) == "" {
 		return nil, fmt.Errorf("config: HTTP_ADDR 不能为空")
+	}
+	// 配置成同一个地址时没有独立监听的意义，按“未启用”处理，避免回调路由被误删。
+	if cfg.InternalAddr == cfg.HTTPAddr {
+		cfg.InternalAddr = ""
 	}
 	if cfg.RoomGrace <= 0 {
 		return nil, fmt.Errorf("config: ROOM_GRACE 必须为正数，当前为 %s", cfg.RoomGrace)

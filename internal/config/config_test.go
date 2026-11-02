@@ -11,7 +11,7 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"HTTP_ADDR", "ROOM_GRACE", "MONITOR_INTERVAL", "VIEWER_TIMEOUT", "PENDING_TIMEOUT",
+		"HTTP_ADDR", "INTERNAL_ADDR", "ROOM_GRACE", "MONITOR_INTERVAL", "VIEWER_TIMEOUT", "PENDING_TIMEOUT",
 		"CORS_ALLOWED_ORIGINS", "PUBLIC_BASE_URL", "TRUSTED_PROXIES",
 		"MEDIAMTX_APP", "MEDIAMTX_API_URL", "MEDIAMTX_API_USER", "MEDIAMTX_API_PASSWORD",
 		"MEDIAMTX_AUTH_SECRET", "MEDIAMTX_AUTH_ALLOWED_CIDRS", "MEDIAMTX_WHEP_PROXY_TARGET",
@@ -32,6 +32,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr != DefaultHTTPAddr {
 		t.Fatalf("默认监听地址应为 %s，实际 %s", DefaultHTTPAddr, cfg.HTTPAddr)
 	}
+	if cfg.InternalAddr != "" {
+		t.Fatalf("默认不应启用独立回调端口，实际 %q", cfg.InternalAddr)
+	}
 	if cfg.RoomGrace != 5*time.Minute {
 		t.Fatalf("默认保留期应为 5 分钟，实际 %s", cfg.RoomGrace)
 	}
@@ -49,6 +52,34 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MonitorInterval != time.Second {
 		t.Fatalf("默认巡检间隔应为 1s，实际 %s", cfg.MonitorInterval)
+	}
+}
+
+func TestLoadInternalAddr(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("HTTP_ADDR", "127.0.0.1:18855")
+	t.Setenv("INTERNAL_ADDR", "127.0.0.1:18856")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InternalAddr != "127.0.0.1:18856" {
+		t.Fatalf("应启用独立回调端口，实际 %q", cfg.InternalAddr)
+	}
+}
+
+func TestLoadInternalAddrEqualToHTTPIsDisabled(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("HTTP_ADDR", "127.0.0.1:18855")
+	t.Setenv("INTERNAL_ADDR", "127.0.0.1:18855")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.InternalAddr != "" {
+		t.Fatalf("与 HTTP_ADDR 相同时应按未启用处理，实际 %q", cfg.InternalAddr)
 	}
 }
 

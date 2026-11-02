@@ -138,9 +138,12 @@ func (h *Hub) Bind(in BindInput) BindResult {
 		}
 	}
 	// 规则 3：同一身份不能同时存在两条推流连接。
+	//
+	// 缺少会话 ID 时也要拒绝：MediaMTX 正常都会带 id，空值只可能来自伪造请求；
+	// 旧代码要求双方都非空，反而给了“空 id 绕过并发限制”的口子。
 	if rm, ok := h.rooms[username]; ok && rm.state == StateLive {
 		prev, hasPrev := h.byUsername[username]
-		if hasPrev && prev.sessionID != "" && in.SessionID != "" && prev.sessionID != in.SessionID {
+		if hasPrev && (prev.sessionID == "" || in.SessionID == "" || prev.sessionID != in.SessionID) {
 			return BindResult{
 				Reason:  ReasonAlreadyPublishing,
 				Message: "该身份正在推流中，请先停止现有的推流连接",

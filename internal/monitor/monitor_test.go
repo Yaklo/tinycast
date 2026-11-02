@@ -154,6 +154,36 @@ func TestTickDegradesLiveRoomsAfterPersistentAPIFailure(t *testing.T) {
 	}
 }
 
+// 降级期间不能回收房间与绑定：MediaMTX 恢复后仍在推的流必须能回到 LIVE。
+func TestTickKeepsBindingsWhileDegraded(t *testing.T) {
+	m, h, fake := newTestMonitor(t, 30*time.Millisecond)
+	bind(t, h)
+	fake.set(pathsJSON(livePath))
+	m.Tick(context.Background())
+
+	fake.fail()
+	for i := 0; i < maxAPIFailures; i++ {
+		m.Tick(context.Background())
+	}
+	if view, _ := h.Room("alex"); view.State != hub.StateGrace {
+		t.Fatalf("降级后应为 GRACE，实际 %s", view.State)
+	}
+
+	// 让保留期与绑定超时都过去；降级期间两者都不应被回收。
+	time.Sleep(50 * time.Millisecond)
+	m.Tick(context.Background())
+	if _, ok := h.Room("alex"); !ok {
+		t.Fatal("降级期间不应释放房间")
+	}
+
+	// 恢复且流仍在：凭保留的绑定直接回到 LIVE。
+	fake.set(pathsJSON(livePath))
+	m.Tick(context.Background())
+	if view, _ := h.Room("alex"); view.State != hub.StateLive {
+		t.Fatalf("恢复后应回到 LIVE，实际 %s", view.State)
+	}
+}
+
 func TestTickIgnoresOtherAppsAndNotReadyPaths(t *testing.T) {
 	m, h, fake := newTestMonitor(t, time.Minute)
 	bind(t, h)

@@ -680,3 +680,43 @@ func TestSSESendsInitialSnapshot(t *testing.T) {
 		t.Fatalf("Content-Type 异常：%s", rec.Header().Get("Content-Type"))
 	}
 }
+
+// XFF 最左段由客户端决定，不能当作真实 IP：从右往左剥离可信代理；
+// 整条链都可信时宁可回退到直连地址，也不采信最左段。
+func TestClientIPSkipsTrustedProxiesFromTheRight(t *testing.T) {
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.TrustedProxies = mustCIDRs(t, "127.0.0.0/8", "10.0.0.0/8")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.1.2.3")
+	if got := srv.clientIP(req); got != "203.0.113.9" {
+		t.Fatalf("应取最右侧不可信地址，实际 %q", got)
+	}
+
+	req.Header.Set("X-Forwarded-For", "10.0.0.2, 10.0.0.3")
+	if got := srv.clientIP(req); got != "127.0.0.1" {
+		t.Fatalf("全部可信时应回退直连地址，实际 %q", got)
+	}
+}
+
+// 配置 INTERNAL_ADDR 后，公网端口不应再注册回调路由。
+func TestInternalAddrRemovesPublicAuthRoute(t *testing.T) {
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.InternalAddr = "127.0.0.1:18856"
+	})
+
+	rec, _ := do(t, srv, http.MethodPost, "/internal/mtx/auth", authBody("publish", "live/alex", "token="+testToken, "s1"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("公网端口不应暴露回调，实际 %d %s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("publish", "live/alex", "token="+testToken, "s1")))
+	req.RemoteAddr = "127.0.0.1:50000"
+	rec = httptest.NewRecorder()
+	srv.InternalHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("内部端口应处理回调，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}

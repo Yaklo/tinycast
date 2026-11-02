@@ -65,7 +65,27 @@ func New(h *hub.Hub, client *mtx.Client, opts Options) *Monitor {
 }
 
 // Run 阻塞轮询，直到 ctx 被取消。启动时先同步一次，避免首页空等一个周期。
+// 单轮 panic 只终止本轮，退避后会重新开始：否则一次意外就让巡检永久停摆，
+// 而进程与 healthz 看起来完全正常。
 func (m *Monitor) Run(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		m.run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		m.logger.Error("MediaMTX 状态巡检异常退出，5 秒后重启")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func (m *Monitor) run(ctx context.Context) {
 	// 巡检 goroutine 里的 panic 不能拖垮整个进程（HTTP 有 recover，这里没有）。
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -116,7 +136,7 @@ func (m *Monitor) Tick(ctx context.Context) bool {
 				changed = true
 			}
 		case m.failures%60 == 0:
-			m.logger.Warn("MediaMTX 控制接口仍不可用", "err", err, "failures", m.failures)
+			m.logger.Error("MediaMTX 控制接口仍不可用", "err", err, "failures", m.failures)
 		}
 	} else {
 		if m.degraded {
@@ -131,13 +151,18 @@ func (m *Monitor) Tick(ctx context.Context) bool {
 		m.logger.Debug("清理无心跳的观看会话", "count", n)
 		changed = true
 	}
-	for _, username := range m.hub.ExpireGrace() {
-		m.logger.Info("保留期结束，已释放房间", "username", username)
-		changed = true
-	}
-	for _, username := range m.hub.ExpireBindings(m.bindingTimeout) {
-		m.logger.Info("身份绑定超时未推流，已释放", "username", username)
-		changed = true
+	// 控制接口降级期间不要回收房间与身份绑定。MediaMTX 只是短暂不可达时，
+	// 绑定被清掉会导致恢复后 ConfirmLive 无主可认，仍在推流的房间永久消失。
+	// 恢复后本轮会先 syncPaths 把 GRACE 房间确认回 LIVE，再正常回收残余。
+	if !m.degraded {
+		for _, username := range m.hub.ExpireGrace() {
+			m.logger.Info("保留期结束，已释放房间", "username", username)
+			changed = true
+		}
+		for _, username := range m.hub.ExpireBindings(m.bindingTimeout) {
+			m.logger.Info("身份绑定超时未推流，已释放", "username", username)
+			changed = true
+		}
 	}
 
 	if changed {

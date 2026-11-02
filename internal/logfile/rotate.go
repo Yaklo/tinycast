@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // RotatingWriter 把日志追加写入文件，文件超过 MaxBytes 时滚动。
@@ -22,7 +23,16 @@ type RotatingWriter struct {
 	file *os.File
 	size int64
 	dead bool
+	// rotateBlocked 表示滚动失败过一次（通常是 Windows 上文件被占用）。
+	// 失败后继续写原文件；隔一段时间再试，既不会每条日志都 rename，
+	// 也不会永远放弃滚动让文件无限增长。
+	rotateBlocked bool
+	rotateRetryAt time.Time
 }
+
+// rotateRetryInterval 是滚动失败后的重试间隔。Windows 上文件占用通常只持续
+// 几秒到几分钟，5 分钟后重试足够，期间文件最多多长 5 分钟的日志。
+const rotateRetryInterval = 5 * time.Minute
 
 // Options 描述滚动策略。
 type Options struct {
@@ -85,8 +95,10 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("logfile: 写入器已关闭")
 	}
 	if w.size+int64(len(p)) > w.maxBytes && w.size > 0 {
-		if err := w.rotate(); err != nil {
-			return 0, err
+		if !w.rotateBlocked || !time.Now().Before(w.rotateRetryAt) {
+			if err := w.rotate(); err != nil {
+				return 0, err
+			}
 		}
 	}
 	n, err := w.file.Write(p)
@@ -117,9 +129,12 @@ func (w *RotatingWriter) rotate() error {
 		w.file = nil
 		if openErr := w.open(); openErr != nil {
 			w.dead = true
+			fmt.Fprintf(os.Stderr, "logfile: 关闭旧日志失败且无法重新打开，后续日志将被丢弃: %v / %v\n", err, openErr)
 			return fmt.Errorf("logfile: 关闭旧日志失败且无法重新打开: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "logfile: 关闭旧日志失败，已继续写入原文件: %v\n", err)
+		w.rotateBlocked = true
+		w.rotateRetryAt = time.Now().Add(rotateRetryInterval)
+		fmt.Fprintf(os.Stderr, "logfile: 关闭旧日志失败，已继续写入原文件，%s 后重试滚动: %v\n", rotateRetryInterval, err)
 		return nil
 	}
 	w.file = nil
@@ -134,14 +149,24 @@ func (w *RotatingWriter) rotate() error {
 		// 此时必须把原文件重新打开继续写，否则后续日志会永久静默丢失。
 		if openErr := w.open(); openErr != nil {
 			w.dead = true
+			fmt.Fprintf(os.Stderr, "logfile: 滚动日志失败且无法重新打开，后续日志将被丢弃: %v / %v\n", err, openErr)
 			return fmt.Errorf("logfile: 滚动日志失败且无法重新打开: %w", err)
 		}
 		// 已经重新打开原文件，让本次写入继续；只往 stderr 提醒一次，
 		// 不要把错误返回给 Write，否则当前这条日志会丢。
-		fmt.Fprintf(os.Stderr, "logfile: 滚动日志失败，已继续写入原文件: %v\n", err)
+		w.rotateBlocked = true
+		w.rotateRetryAt = time.Now().Add(rotateRetryInterval)
+		fmt.Fprintf(os.Stderr, "logfile: 滚动日志失败，已继续写入原文件，%s 后重试滚动: %v\n", rotateRetryInterval, err)
 		return nil
 	}
-	return w.open()
+	if err := w.open(); err != nil {
+		w.dead = true
+		fmt.Fprintf(os.Stderr, "logfile: 滚动后无法打开新日志文件，后续日志将被丢弃: %v\n", err)
+		return err
+	}
+	w.rotateBlocked = false
+	w.rotateRetryAt = time.Time{}
+	return nil
 }
 
 var _ io.WriteCloser = (*RotatingWriter)(nil)

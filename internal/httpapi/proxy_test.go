@@ -203,3 +203,34 @@ func TestProxyDisabledFallsBackToSPA(t *testing.T) {
 		t.Fatalf("未配置代理时不应 5xx，实际 %d", rec.Code)
 	}
 }
+
+// 单个 IP 的并发媒体请求必须有独立上限：全局 512 槽挡不住一个人开 512 条慢连接。
+func TestMediaSlotPerIPLimit(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	ip := "203.0.113.7"
+	for i := 0; i < maxMediaPerIP; i++ {
+		if !srv.acquireMediaSlot(ip) {
+			t.Fatalf("第 %d 条连接不应被拒绝", i+1)
+		}
+	}
+	if srv.acquireMediaSlot(ip) {
+		t.Fatal("超过单 IP 配额后应拒绝")
+	}
+	if !srv.acquireMediaSlot("203.0.113.8") {
+		t.Fatal("其它 IP 不应受影响")
+	}
+	srv.releaseMediaSlot(ip)
+	if !srv.acquireMediaSlot(ip) {
+		t.Fatal("释放后应可以重新占用")
+	}
+}
+
+// 控制字符不在正常 URL 路径里，不能转发给上游。
+func TestValidMediaPathRejectsControlChars(t *testing.T) {
+	if validMediaPath("/hls/live/alex/\x00/index.m3u8", "/hls", "live") {
+		t.Fatal("含 NUL 的路径应被拒绝")
+	}
+	if !validMediaPath("/hls/live/alex/index.m3u8", "/hls", "live") {
+		t.Fatal("正常路径不应被拒绝")
+	}
+}

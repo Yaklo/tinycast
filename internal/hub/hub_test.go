@@ -128,6 +128,18 @@ func TestBindRejectsConcurrentPublisher(t *testing.T) {
 	}
 }
 
+// 会话 ID 缺失时不能绕过规则 3：否则任何伪造请求都能同时占用同一身份。
+func TestBindRejectsConcurrentPublisherWithoutSessionID(t *testing.T) {
+	h, _ := newTestHub()
+	mustBind(t, h, "alex", "测试直播", testToken, "session-a")
+	h.ConfirmLive("alex", nil)
+
+	res := h.Bind(BindInput{Username: "alex", RoomName: "测试直播", Token: testToken})
+	if res.Allowed || res.Reason != ReasonAlreadyPublishing {
+		t.Fatalf("空会话 ID 也应拒绝并发推流，实际 allowed=%v reason=%s", res.Allowed, res.Reason)
+	}
+}
+
 // 同一条连接重复回调（MediaMTX 可能重试）必须幂等放行。
 func TestBindIsIdempotentForSameSession(t *testing.T) {
 	h, _ := newTestHub()

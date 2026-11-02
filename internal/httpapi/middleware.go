@@ -139,20 +139,28 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 // clientIP 返回请求的真实来源地址。
 //
-// 只有当直连来源是可信反向代理时才采信 X-Forwarded-For / X-Real-IP：
+// 只有当直连来源是可信反向代理时才采信 X-Forwarded-For：
 // 否则任何客户端都能自己写一个 XFF 头来冒充内网地址，绕过鉴权回调白名单。
 func (s *Server) clientIP(r *http.Request) string {
 	remote := hostOnly(r.RemoteAddr)
 	if !s.trustedProxy(remote) {
 		return remote
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-			return hostOnly(first)
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		// XFF 是“客户端, 代理1, 代理2”的顺序，从右往左剥离可信代理，
+		// 取第一个不可信地址。取最左段等于让客户端自己决定 IP。
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := hostOnly(strings.TrimSpace(parts[i]))
+			if candidate == "" {
+				continue
+			}
+			if !s.trustedProxy(candidate) {
+				return candidate
+			}
 		}
-	}
-	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
-		return hostOnly(real)
+		// 整条链都是可信代理时，最左段完全可能由客户端自己写入。
+		// 宁可回退到直连地址（可信代理本身），也不要采信这个可伪造的值。
 	}
 	return remote
 }
@@ -180,5 +188,9 @@ func (s *Server) trustedProxy(ip string) bool {
 
 // hasForwardedHeader 判断请求是否经过反向代理。
 func hasForwardedHeader(r *http.Request) bool {
-	return r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != ""
+	return r.Header.Get("X-Forwarded-For") != "" ||
+		r.Header.Get("X-Real-IP") != "" ||
+		r.Header.Get("Forwarded") != "" ||
+		r.Header.Get("X-Forwarded-Host") != "" ||
+		r.Header.Get("X-Forwarded-Proto") != ""
 }

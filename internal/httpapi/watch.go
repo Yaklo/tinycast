@@ -48,6 +48,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_viewer", err.Error())
 		return
 	}
+	// 先校验参数再扣额度：否则 24 rps 的无效请求就能把同一个 NAT 出口
+	// 后面所有观众的心跳额度耗尽 10 秒。
+	if !s.watchLimiter.allow(watchLimitKey(username, s.clientIP(r))) {
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "too_many_requests", "观看心跳过于频繁，请稍后再试")
+		return
+	}
 
 	view, ok := s.hub.Room(username)
 	if !ok {
@@ -91,6 +98,11 @@ func (s *Server) handleUnwatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_viewer", err.Error())
 		return
 	}
+	if !s.unwatchLimiter.allow(watchLimitKey(username, s.clientIP(r))) {
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "too_many_requests", "请求过于频繁，请稍后再试")
+		return
+	}
 
 	if s.hub.Unwatch(username, viewerID) {
 		s.scheduleBroadcast()
@@ -120,6 +132,12 @@ func sameOriginRequest(r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+// watchLimitKey 按「房间 + 客户端」计数：一个人刷 A 房间不应影响别人看 B 房间。
+// IPv6 地址收敛到 /64，否则同一台机器整段地址轮流用等于没有限额。
+func watchLimitKey(username, ip string) string {
+	return username + "|" + eventStreamKey(ip)
 }
 
 func decodeViewerID(r *http.Request) (string, error) {
