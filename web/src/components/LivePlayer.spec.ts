@@ -183,12 +183,15 @@ beforeEach(() => {
     'fetch',
     vi.fn(async () => new Response(SDP, { status: 201, headers: { 'Content-Type': 'application/sdp' } })),
   )
+  // happy-dom 没有 getVideoPlaybackQuality；用例里补过的要在每个用例前清掉，避免互相污染。
+  delete (HTMLMediaElement.prototype as { getVideoPlaybackQuality?: unknown }).getVideoPlaybackQuality
   vi.useFakeTimers()
 })
 
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  delete (HTMLMediaElement.prototype as { getVideoPlaybackQuality?: unknown }).getVideoPlaybackQuality
 })
 
 describe('LivePlayer', () => {
@@ -627,6 +630,193 @@ describe('LivePlayer', () => {
 
     expect(wrapper.find('.overlay').text()).toContain('MEDIAMTX_HLS_PROXY_TARGET')
     expect(wrapper.findAll('button').some((node) => node.text() === '重新连接')).toBe(true)
+  })
+
+  it('旧 WebView 没有 getVideoPlaybackQuality 时不算停帧，也不伪造帧率', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    expect('getVideoPlaybackQuality' in HTMLMediaElement.prototype).toBe(false)
+
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    // 没有帧计数能力：只能拿 readyState / currentTime 判断“确实出画了”。
+    const video = wrapper.find('video').element as HTMLVideoElement
+    Object.defineProperty(video, 'readyState', { configurable: true, get: () => 4 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => 1.5, set: () => {} })
+
+    hlsLog.emit('hlsManifestParsed')
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+
+    // 仍然能进入播放态（覆盖层收起），否则观众会一直盯着“正在连接”。
+    expect(wrapper.find('.overlay').exists()).toBe(false)
+
+    // 12 秒没有“新帧”（本来就是没有帧计数）也不能报停帧。
+    await vi.advanceTimersByTimeAsync(12_000)
+    await flushPromises()
+    expect(wrapper.find('.stall-chip').exists()).toBe(false)
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+
+    const grid = wrapper.find('.stats-grid').text()
+    expect(grid).toContain('播放中')
+    // 帧率与解码帧都不该伪造数字
+    expect(grid).not.toContain('fps')
+    expect(grid).toContain('解码帧—')
+  })
+
+  it('旧 WebView 一直没出画时仍给出超时提示，不会永远停在连接中', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    hlsLog.emit('hlsManifestParsed')
+    // 没有帧计数，readyState / currentTime 也一直起不来：确实没画面
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flushPromises()
+
+    // 无帧计数只关掉「播放中掉帧」的误报，不能把「压根没起来」也一起吞掉
+    expect(wrapper.find('.overlay').exists()).toBe(true)
+    expect(wrapper.find('.overlay-title').text()).toContain('正在连接 HLS 播放')
+    expect(wrapper.find('.overlay-note').text()).toContain('HLS 播放列表已拉取')
+    expect(wrapper.find('.stall-chip').exists()).toBe(false)
+  })
+
+  it('关掉 LL-HLS 时，WebRTC 自动回退的文案写 HLS', async () => {
+    localStorage.setItem('tinycast.llhls', 'off')
+    fetchPlayMock.mockResolvedValue(playResponse('hls', true))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const webrtc = wrapper.findAll('.mode-btn').find((node) => node.text() === 'WebRTC')
+    await webrtc?.trigger('click')
+    await flushPromises()
+
+    for (let tick = 0; tick < 7; tick++) {
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
+    }
+
+    const chip = wrapper.find('.auto-chip')
+    expect(chip.exists()).toBe(true)
+    expect(chip.attributes('role')).toBe('status')
+    expect(chip.text()).toContain('已自动切回 HLS')
+    expect(chip.text()).not.toContain('LL-HLS')
+    // 自动回退只改本次会话，用户的通道选择不被覆盖
+    expect(localStorage.getItem('tinycast.playMode')).toBe('webrtc')
+    expect(localStorage.getItem('tinycast.llhls')).toBe('off')
+  })
+
+  it('拖动音量条期间控制条不会中途收起', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const quality = { totalVideoFrames: 30, droppedVideoFrames: 0 }
+    Object.defineProperty(HTMLMediaElement.prototype, 'getVideoPlaybackQuality', {
+      configurable: true,
+      value: () => quality,
+    })
+
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    hlsLog.emit('hlsManifestParsed')
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+
+    const controlsHidden = () =>
+      (wrapper.find('.controls').attributes('style') ?? '').includes('display: none')
+    const slider = wrapper.find('.volume-slider')
+    expect(controlsHidden()).toBe(false)
+
+    // 播放态下计时已经开始：先走 2 秒，再用一次 input 把计时重新推到 4.5 秒。
+    await vi.advanceTimersByTimeAsync(2000)
+    await slider.setValue('0.4')
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+    expect(controlsHidden()).toBe(false)
+
+    // 手指按住滑块不动：没有 input 也不能收起控制条。
+    await slider.trigger('pointerdown')
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(controlsHidden()).toBe(false)
+
+    // 松手后重新按 2.5 秒计时
+    await slider.trigger('pointerup')
+    await vi.advanceTimersByTimeAsync(2600)
+    await flushPromises()
+    expect(controlsHidden()).toBe(true)
+  })
+
+  it('统计面板的 LL-HLS 延迟说明跟着档位走', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    hlsLog.emit('hlsManifestParsed')
+    hlsLog.emit('hlsLevelUpdated', { details: { fragments: [{ end: 10 }], partTarget: 0.2 } })
+    await vi.advanceTimersByTimeAsync(1100)
+    await flushPromises()
+
+    await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.stats-note').text()).toContain('稳定档的目标延迟约 3 秒')
+
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
+    await flushPromises()
+    const low = wrapper.findAll('.tier-btn').find((node) => node.text() === '低延时')
+    await low?.trigger('click')
+    await flushPromises()
+
+    // 重建后要重新收到 LL-HLS 清单事件，分发协议才会再标成 LL-HLS
+    hlsLog.emit('hlsLevelUpdated', { details: { fragments: [{ end: 10 }], partTarget: 0.2 } })
+    await flushPromises()
+    expect(wrapper.find('.stats-note').text()).toContain('低延时档的目标延迟约 1.2 秒')
+  })
+
+  it('控制条、提示条与覆盖层补齐可访问性标注', async () => {
+    fetchPlayMock.mockResolvedValue(playResponse('hls'))
+    const wrapper = mountPlayer()
+    await flushPromises()
+
+    const video = wrapper.find('video')
+    expect(video.attributes('aria-label')).toBe('直播画面')
+    expect(video.attributes('tabindex')).toBe('0')
+
+    const labels = wrapper
+      .findAll('.controls button[aria-label]')
+      .map((node) => node.attributes('aria-label'))
+    expect(labels).toEqual([
+      '刷新播放',
+      '播放参数',
+      '显示播放统计',
+      '取消静音',
+      '小窗（画中画）',
+      '网页全屏',
+      '全屏',
+    ])
+    expect(wrapper.findAll('.mode-btn').map((node) => node.attributes('aria-pressed'))).toEqual([
+      'true',
+      'false',
+      'false',
+    ])
+
+    // 连接中的覆盖层用 live region 播报，而不是把按钮也塞进去
+    expect(wrapper.find('.overlay-text').attributes('role')).toBe('status')
+    expect(wrapper.find('.overlay-text').attributes('aria-live')).toBe('polite')
+
+    await buttonByTitle(wrapper, '播放参数')?.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.tier-btn').map((node) => node.attributes('aria-pressed'))).toEqual([
+      'false',
+      'true',
+    ])
+    expect(wrapper.findAll('.engine-btn').map((node) => node.attributes('aria-pressed'))).toEqual([
+      'true',
+      'false',
+      'false',
+    ])
+    expect(buttonByTitle(wrapper, '播放参数')?.attributes('aria-pressed')).toBe('true')
   })
 
   it('房间切到 GRACE 时停止播放', async () => {

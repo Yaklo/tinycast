@@ -21,12 +21,6 @@ const fetchError = ref('')
 /** 推流编码信息（来自 MediaMTX 的 paths API），用于在播放前就提示"H.265 能不能放"。 */
 const media = ref<MediaInfo | null>(null)
 
-/**
- * 观众心跳：进入房间即开始上报，离开页面时主动下线。
- * 后端按 viewerId 去重，因此 WebRTC 与 HLS 两种播放模式下的人数口径一致。
- */
-const viewerWatch = useWatch(() => username.value)
-
 /** 页面顶部只提示"换通道也救不了"的硬错误（例如 4:4:4 / 10bit），
  *  H.265 这类"切到 HLS 就能看"的情况交给播放器自己解释。 */
 const issue = computed(() => {
@@ -39,30 +33,45 @@ const room = computed<RoomView | null>(() =>
   findRoom(username.value) ?? (roomsState.loaded ? null : fallback.value),
 )
 
+/**
+ * 观众心跳：进入房间即开始上报，离开页面时主动下线。
+ * 后端按 viewerId 去重，因此 WebRTC 与 HLS 两种播放模式下的人数口径一致。
+ *
+ * canWatch 把"要不要上报"交给房间状态：直接打开一个 GRACE / 还没出现的房间时，
+ * setup 里那次自动上报就不发了，等状态 watcher 看到 LIVE 再 start()。
+ */
+const viewerWatch = useWatch(() => username.value, {
+  canWatch: () => room.value?.state === 'LIVE',
+})
+
 const { label: graceLabel, expired: graceExpired } = useCountdown(() => room.value?.graceUntil ?? 0)
 
 async function load(): Promise<void> {
+  const target = username.value
   loading.value = true
   notFound.value = false
   fetchError.value = ''
 
-  if (findRoom(username.value)) {
+  if (findRoom(target)) {
     loading.value = false
     return
   }
 
   try {
-    const data = await fetchRoom(username.value)
+    const data = await fetchRoom(target)
+    // 切房后旧请求可能才返回：只让当前房间的响应落地，避免把新房间标成 404。
+    if (target !== username.value) return
     fallback.value = data.room
     media.value = data.room.media ?? null
   } catch (err) {
+    if (target !== username.value) return
     if (err instanceof ApiError && err.status === 404) {
       notFound.value = true
     } else {
       fetchError.value = err instanceof Error ? err.message : '加载房间失败'
     }
   } finally {
-    loading.value = false
+    if (target === username.value) loading.value = false
   }
 }
 
@@ -71,9 +80,10 @@ async function load(): Promise<void> {
  * 而 H.265 这类"注定黑屏"的情况值得在页面顶部先说清楚。
  */
 async function loadMedia(): Promise<void> {
+  const target = username.value
   try {
-    const data = await fetchRoom(username.value)
-    media.value = data.room.media ?? null
+    const data = await fetchRoom(target)
+    if (target === username.value) media.value = data.room.media ?? null
   } catch {
     // 编码信息只是提示增强，拿不到就按"未知"处理
   }
@@ -88,20 +98,34 @@ watch(username, () => {
   fallback.value = null
   media.value = null
   // 同一页面切到另一个房间时必须把心跳改成新房间，否则会给旧房间永久 +1。
+  // 是否启动交给下面的房间 watcher：它会看到新房间（或兜底数据）后按状态决定。
   viewerWatch.leave()
-  viewerWatch.start()
   void load()
   void loadMedia()
 })
 
-// 重新推流后编码可能变了（比如主播把 H.265 改成了 H.264），跟着刷新一次。
+/**
+ * 房间状态变化时的两件事：
+ * 1. 重新推流后编码可能变了（比如主播把 H.265 改成了 H.264），跟着刷新一次；
+ * 2. 心跳跟着状态走——GRACE / 房间已释放时停掉，避免给断流的房间持续计数；
+ *    回到 LIVE（同名房间重新开播、404 之后房间重新出现）时立刻补一拍，人数不用等 30 秒。
+ */
+// 键里带 username 与 startedAt：同名房间重新开播时 state 仍是 LIVE，
+// 仅看 state 会漏掉"心跳已被 3 次 404 停掉、需要重新开始"的情况；用字符串而不是数组，
+// 避免 getter 每次求值都返回新数组导致 watcher 每帧触发。
 watch(
-  () => room.value?.state,
-  (state, prev) => {
-    if (state && state !== prev) {
+  () => (room.value ? `${username.value}:${room.value.state}:${room.value.startedAt}` : ''),
+  (key, prev) => {
+    if (key === prev) return
+    if (key) {
+      // 房间已经出现在快照里，之前那次 404 不再代表现状（模板里还有 !room 兜底）。
+      notFound.value = false
       void loadMedia()
-      // 房间释放后心跳会降频；同名房间重新开播时立刻补一拍，人数不用等 30 秒。
-      if (state === 'LIVE') viewerWatch.start()
+    }
+    if (room.value?.state === 'LIVE') {
+      viewerWatch.start()
+    } else {
+      viewerWatch.stop()
     }
   },
 )
@@ -119,7 +143,9 @@ watch(
   <div class="room-page">
     <RouterLink to="/" class="back">← 返回房间列表</RouterLink>
 
-    <div v-if="notFound" class="state-panel">
+    <!-- 404 只是"取详情那一刻还没有房间"：SSE 快照里一出现房间就要让位，
+         否则主播开播后页面会一直停在"房间不存在"上。 -->
+    <div v-if="notFound && !room" class="state-panel">
       <h2>房间不存在或已释放</h2>
       <p>断流超过保留时间后，用户名会连同房间一起释放。请让主播重新推流，或回到首页看看其他房间。</p>
       <RouterLink to="/" class="btn btn-primary">返回首页</RouterLink>

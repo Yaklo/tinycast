@@ -149,6 +149,11 @@ function currentTuning() {
 /** 面板里展示的档位文案。 */
 const tierText = computed(() => tierLabel(tier.value, llhls.value))
 
+/** 统计面板里 LL-HLS 的延迟说明：目标延迟由档位决定，不能写死「1 秒内」。 */
+const llhlsTargetText = computed(() =>
+  tier.value === 'low' ? '低延时档的目标延迟约 1.2 秒' : '稳定档的目标延迟约 3 秒',
+)
+
 /** 档位按钮的悬停说明：为什么有时候是灰的。 */
 function tierTitle(value: Tier): string {
   if (mode.value === 'webrtc') return 'WebRTC 通道不解析分片，延迟档位只在 LL-HLS 下生效'
@@ -278,6 +283,34 @@ let lastFrameCount = 0
 let droppedTotal = 0
 /** HLS 累计下载字节（视频 + 音频 + 音频轨）。 */
 let hlsBytes = 0
+/** 这个 <video> 能不能给出可靠的累计解码帧数。 */
+function hasFrameCounter(video?: HTMLVideoElement | null): boolean {
+  const el = video ?? videoEl.value
+  return Boolean(el && typeof el.getVideoPlaybackQuality === 'function')
+}
+
+/**
+ * 没有帧计数能力时，用 readyState / currentTime 判断「确实出画了」。
+ *
+ * 只能拿来判断能不能进入播放态：currentTime 停住、readyState 掉下去的原因太多
+ * （暂停、缓冲、切档），据此报「停帧」会误伤，所以停帧判断只认累计帧数。
+ */
+function videoHasPicture(video?: HTMLVideoElement | null): boolean {
+  const el = video ?? videoEl.value
+  return Boolean(el && el.readyState >= 3 && el.currentTime > 0)
+}
+
+/**
+ * 当前通道有没有可信的累计帧计数。
+ *
+ * WebRTC 走 RTP 统计里的 framesDecoded，和 getVideoPlaybackQuality 无关；
+ * HLS / 原生只能靠 getVideoPlaybackQuality，旧 WebView 往往没有这个方法。
+ */
+function frameCountingAvailable(): boolean {
+  if (mode.value === 'webrtc') return true
+  return hasFrameCounter(videoEl.value)
+}
+
 /** 最近几个分片的 字节数 / 媒体时长，用来算视频、音频码率。 */
 let hlsVideoWindow: { bytes: number; duration: number }[] = []
 let hlsAudioWindow: { bytes: number; duration: number }[] = []
@@ -1041,16 +1074,16 @@ function hlsSample(now: number, prev: StatsSample | null): StatsSample {
   s.downloadKbps = measuredDownloadKbps() || hlsBandwidthKbps()
   s.receivedBytes = hlsBytes
 
-  const quality = video?.getVideoPlaybackQuality?.()
+  const quality = hasFrameCounter(video) ? video?.getVideoPlaybackQuality?.() : null
   let dropped = 0
   if (quality) {
     const total = Number(quality.totalVideoFrames ?? 0)
     dropped = Number(quality.droppedVideoFrames ?? 0)
     s.framesDecoded = Math.max(0, total - dropped)
-  } else {
-    // 少数环境没有 getVideoPlaybackQuality；用 readyState 判断“确实出画了”。
-    s.framesDecoded = video && video.readyState >= 3 && video.currentTime > 0 ? 1 : 0
   }
+  // 没有 getVideoPlaybackQuality（旧 WebView 常见）：帧数一律留 0，不再兜底成「1」。
+  // 兜底成 1 等于对外宣称「有且只有一帧」：trackProgress 会把恒定不变的值判成停帧，
+  // 帧率也永远为 0。能不能进入 playing 改看 readyState / currentTime，见 trackProgress。
 
   const deltaDropped = Math.max(0, dropped - droppedTotal)
   droppedTotal = dropped
@@ -1080,20 +1113,26 @@ function hlsBandwidthKbps(): number {
 
 function trackProgress(next: StatsSample, now: number): void {
   const frames = next.framesDecoded
-  if (frames > lastFrameCount) {
+  // 没有帧计数能力时（旧 WebView、部分内嵌浏览器）framesDecoded 恒为 0：
+  // 这时既不判断停帧、也不拿它算帧率，起播改看 readyState / currentTime。
+  const counted = frameCountingAvailable()
+  const hasPicture = counted ? frames > 0 : videoHasPicture(videoEl.value)
+
+  if (counted && frames > lastFrameCount) {
     lastFrameCount = frames
     lastFrameAt = now
     stallNote.value = ''
   }
 
-  if (phase.value === 'connecting' && frames > 0) {
+  if (phase.value === 'connecting' && hasPicture) {
     phase.value = 'playing'
     errorText.value = ''
     overlayNote.value = ''
     mediaRetries = 0
   }
 
-  if (lastFrameAt > 0 && now - lastFrameAt > 8000 && phase.value === 'playing') {
+  // 「停帧」只认累计帧数：没有这个能力就宁可什么都不说，也别误报。
+  if (counted && lastFrameAt > 0 && now - lastFrameAt > 8000 && phase.value === 'playing') {
     stallNote.value = '画面停住了：已经超过 8 秒没有新的视频帧。' + noFrameHint(props.media, mode.value)
   }
 
@@ -1105,17 +1144,22 @@ function trackProgress(next: StatsSample, now: number): void {
 }
 
 /**
- * WebRTC 通道取不到画面时自动回退到 LL-HLS。
+ * WebRTC 通道取不到画面时自动回退到 HLS（LL-HLS 开关打开时就是 LL-HLS）。
  * MediaMTX 检测到 H.264 带 B 帧会直接断开会话，这是最常见的原因。
- * 不写回 localStorage：用户改好 OBS 设置后，下次仍然能一键回到 WebRTC。
+ * 不写回 localStorage：用户改好 OBS 设置后，下次仍然能一键回到 WebRTC；
+ * 这里只改本次会话的 mode，通道选择（tinycast.playMode）保持用户原来的选择。
  */
 function autoFallbackFromWebRTC(reason: string): boolean {
   if (mode.value !== 'webrtc' || fallbackTried) return false
   if (!playback.value?.hlsUrl) return false
   fallbackTried = true
+  // 回退目标是当前实际会用的 HLS 通道：关掉 LL-HLS 时它就是普通 HLS，别再写死 LL-HLS。
+  const target = llhls.value ? 'LL-HLS' : 'HLS'
   autoSwitchNote.value =
     reason +
-    '，已自动切回 LL-HLS。最常见的原因是 OBS 的 H.264 开着 B 帧：把 输出 → 高级 →「最大 B 帧数」设为 0' +
+    '，已自动切回 ' +
+    target +
+    '。最常见的原因是 OBS 的 H.264 开着 B 帧：把 输出 → 高级 →「最大 B 帧数」设为 0' +
     '（x264 自定义选项写 bframes=0）后重新推流，再点「WebRTC」即可。'
   mode.value = 'hls'
   if (props.room.state === 'LIVE') void start()
@@ -1128,6 +1172,12 @@ function armWatchdog(token: number): void {
     if (token !== generation) return
     if (lastFrameCount > 0) return
     const hint = noFrameHint(props.media, mode.value)
+    if (!frameCountingAvailable()) {
+      // 没有帧计数能力（旧 WebView）：进了播放态以后「掉帧」无从判断，别按「一帧都没有」误报；
+      // 但连接阶段仍要保留超时提示，否则这种情况会永远停在「正在连接…」，连排查方向都不给。
+      if (phase.value !== 'playing') overlayNote.value = hint
+      return
+    }
     if (phase.value === 'playing') {
       // WebRTC 可能已经 connected、但一帧都没收到；此时覆盖层是隐藏的。
       stallNote.value = '已经连上，但一直没有画面。' + hint
@@ -1251,9 +1301,25 @@ function toggleMute(): void {
   applyVolume()
 }
 
+/**
+ * 按住音量条时挂起「静止 2.5 秒收起」的计时。
+ *
+ * 触屏拖动是手指按住滑块连续移动，没有 mousemove，只有 input；手指停在滑块上不动时
+ * 两次 input 之间可能超过 2.5 秒，控制条会连滑块一起消失。松手后再由 pokeControls 重新计时。
+ */
+function holdControls(): void {
+  controlsVisible.value = true
+  if (controlsTimer !== null) {
+    clearTimeout(controlsTimer)
+    controlsTimer = null
+  }
+}
+
 function onVolumeInput(event: Event): void {
   const raw = Number((event.target as HTMLInputElement).value)
   if (!Number.isFinite(raw)) return
+  // 触屏拖动没有 mousemove：每次输入都重新计时，拖多久控制条都不会中途消失。
+  pokeControls()
   volume.value = Math.min(1, Math.max(0, raw))
   muted.value = volume.value === 0
   applyVolume()
@@ -1379,16 +1445,27 @@ onBeforeUnmount(() => {
       @dblclick.self="onStageDoubleClick"
       @mousemove="pokeControls"
       @touchstart.passive="pokeControls"
+      @focusin="pokeControls"
       @mouseleave="hideControls"
     >
       <!-- 不写 controls：原生控件会和下面自绘的控制条叠在一起 -->
-      <video ref="videoEl" class="video" playsinline autoplay :muted="muted" />
+      <video
+        ref="videoEl"
+        class="video"
+        playsinline
+        autoplay
+        :muted="muted"
+        tabindex="0"
+        aria-label="直播画面"
+      />
 
       <div v-if="phase !== 'playing'" class="overlay">
         <template v-if="phase === 'connecting'">
           <span class="spinner" aria-hidden="true"></span>
-          <p class="overlay-title">{{ mode === 'hls' ? '正在连接 HLS 播放…' : '正在建立 WebRTC 连接…' }}</p>
-          <p v-if="overlayNote" class="overlay-note">{{ overlayNote }}</p>
+          <div class="overlay-text" role="status" aria-live="polite">
+            <p class="overlay-title">{{ mode === 'hls' ? '正在连接 HLS 播放…' : '正在建立 WebRTC 连接…' }}</p>
+            <p v-if="overlayNote" class="overlay-note">{{ overlayNote }}</p>
+          </div>
           <div v-if="overlayNote" class="overlay-actions">
             <button class="overlay-btn" type="button" @click="retry">重新连接</button>
             <button
@@ -1402,8 +1479,10 @@ onBeforeUnmount(() => {
           </div>
         </template>
         <template v-else>
-          <p class="overlay-title">无法播放</p>
-          <p class="overlay-note">{{ errorText }}</p>
+          <div class="overlay-text" role="status" aria-live="polite">
+            <p class="overlay-title">无法播放</p>
+            <p class="overlay-note">{{ errorText }}</p>
+          </div>
           <div class="overlay-actions">
             <button class="overlay-btn" type="button" @click="retry">重新连接</button>
             <button
@@ -1418,14 +1497,21 @@ onBeforeUnmount(() => {
         </template>
       </div>
 
-      <p v-if="phase === 'playing' && stallNote" class="stall-chip">{{ stallNote }}</p>
+      <p
+        v-if="phase === 'playing' && stallNote"
+        class="stall-chip"
+        role="status"
+        aria-live="polite"
+      >
+        {{ stallNote }}
+      </p>
 
-      <p v-if="autoSwitchNote" class="stall-chip auto-chip">
+      <p v-if="autoSwitchNote" class="stall-chip auto-chip" role="status" aria-live="polite">
         <span>{{ autoSwitchNote }}</span>
         <button type="button" class="chip-btn" @click="autoSwitchNote = ''">知道了</button>
       </p>
 
-      <p v-if="controlNote" class="stall-chip control-chip">
+      <p v-if="controlNote" class="stall-chip control-chip" role="status" aria-live="polite">
         <span>{{ controlNote }}</span>
         <button type="button" class="chip-btn" @click="controlNote = ''">知道了</button>
       </p>
@@ -1452,6 +1538,7 @@ onBeforeUnmount(() => {
             :class="{ active: channel === 'llhls' }"
             :disabled="!playback?.hlsUrl"
             :title="CHANNEL_HINTS.llhls"
+            :aria-pressed="channel === 'llhls'"
             @click="setChannel('llhls')"
           >
             LL-HLS
@@ -1462,6 +1549,7 @@ onBeforeUnmount(() => {
             :class="{ active: channel === 'hls' }"
             :disabled="!playback?.hlsUrl"
             :title="CHANNEL_HINTS.hls"
+            :aria-pressed="channel === 'hls'"
             @click="setChannel('hls')"
           >
             HLS
@@ -1472,6 +1560,7 @@ onBeforeUnmount(() => {
             :class="{ active: channel === 'webrtc' }"
             :disabled="!playback?.whepUrl"
             :title="CHANNEL_HINTS.webrtc"
+            :aria-pressed="channel === 'webrtc'"
             @click="setChannel('webrtc')"
           >
             WebRTC
@@ -1490,6 +1579,8 @@ onBeforeUnmount(() => {
           class="ctrl"
           :class="{ on: showSettings }"
           title="播放参数"
+          aria-label="播放参数"
+          :aria-pressed="showSettings"
           @click="toggleSettings"
         >
           ⚙
@@ -1499,6 +1590,8 @@ onBeforeUnmount(() => {
           class="ctrl"
           :class="{ on: showStats }"
           title="显示播放统计"
+          aria-label="显示播放统计"
+          :aria-pressed="showStats"
           @click="toggleStats"
         >
           🩺
@@ -1524,12 +1617,33 @@ onBeforeUnmount(() => {
             :title="'音量 ' + volumePercent + '%'"
             :aria-valuetext="volumePercent + '%'"
             aria-label="音量"
+            @pointerdown="holdControls"
+            @pointerup="pokeControls"
+            @pointercancel="pokeControls"
             @input="onVolumeInput"
           />
         </div>
-        <button type="button" class="ctrl" title="小窗（画中画）" @click="togglePip">⧉</button>
-        <button type="button" class="ctrl" :class="{ on: theater }" title="网页全屏" @click="toggleTheater">⛶</button>
-        <button type="button" class="ctrl" title="全屏" @click="toggleFullscreen">⤢</button>
+        <button
+          type="button"
+          class="ctrl"
+          title="小窗（画中画）"
+          aria-label="小窗（画中画）"
+          @click="togglePip"
+        >
+          ⧉
+        </button>
+        <button
+          type="button"
+          class="ctrl"
+          :class="{ on: theater }"
+          title="网页全屏"
+          aria-label="网页全屏"
+          :aria-pressed="theater"
+          @click="toggleTheater"
+        >
+          ⛶
+        </button>
+        <button type="button" class="ctrl" title="全屏" aria-label="全屏" @click="toggleFullscreen">⤢</button>
       </div>
 
     </div>
@@ -1551,6 +1665,7 @@ onBeforeUnmount(() => {
               :class="{ active: tier === option.value }"
               :disabled="!llhls || engine === 'native'"
               :title="tierTitle(option.value)"
+              :aria-pressed="tier === option.value"
               @click="setTier(option.value)"
             >
               {{ option.label }}
@@ -1568,6 +1683,7 @@ onBeforeUnmount(() => {
               class="engine-btn"
               :class="{ active: enginePref === option.value }"
               :disabled="option.value === 'native' && !nativeReady"
+              :aria-pressed="enginePref === option.value"
               :title="
                 option.value === 'native' && !nativeReady
                   ? '这个浏览器没有原生 HLS 播放能力（只有 Safari / iOS 有）'
@@ -1627,7 +1743,7 @@ onBeforeUnmount(() => {
             原生播放器不把分片信息交给页面，所以码率、下载速率这类指标为空；它也可能按整段分片播放，延迟由系统决定。
           </template>
           <template v-else-if="delivery === 'll-hls'">
-            当前清单带 LL-HLS 分片（0.2 秒一片），播放器贴着直播边缘起播，延迟通常在 1 秒内。
+            当前清单带 LL-HLS 分片（0.2 秒一片），播放器贴着直播边缘起播，{{ llhlsTargetText }}（以「直播延迟」实测值为准）。
           </template>
           <template v-else-if="!llhls">
             已关闭 LL-HLS：按整段分片缓冲，延迟升到十几秒，换来弱网下不卡。
@@ -1695,6 +1811,13 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+}
+
+/* 覆盖层里标题与说明的 live region 包装：保持原来的纵向间距与居中。 */
+.overlay-text {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
 }
 
 .overlay-note {
