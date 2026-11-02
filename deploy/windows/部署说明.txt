@@ -25,7 +25,7 @@ TinyCast Windows 运行包使用说明
   mediamtx\mediamtx.exe   MediaMTX 主程序
   mediamtx\mediamtx.yml   MediaMTX 配置（推流鉴权回调写在这里）
   mediamtx\LICENSE        MediaMTX 的 MIT 许可（必须随包保留）
-  logs\                   运行日志，出问题时先看这里
+  logs\                   运行日志，出问题时先看这里（首次启动自动创建）
 
 
 三、第一次使用
@@ -33,7 +33,8 @@ TinyCast Windows 运行包使用说明
   1. 把整个文件夹解压到本地磁盘（不要放在压缩包里直接运行）。
   2. 只在本机看可以跳过这步。要从其它设备访问时，右键 open-firewall.cmd →
      以管理员身份运行，放通端口（只需一次）。
-  3. 双击 start-all.cmd。会弹出两个窗口：
+  3. 双击 start-all.cmd。会弹出两个窗口（脚本用 Windows 10 1803+ 自带的 curl.exe 做就绪探测，
+     系统没有 curl 时会提示）：
        TinyCast - MediaMTX   媒体服务，关掉它就断流；
        TinyCast 控制台       业务后端，按 Ctrl+C 停止。
   4. 浏览器会自动打开 http://127.0.0.1:18855 。
@@ -55,6 +56,7 @@ TinyCast Windows 运行包使用说明
 
   TCP 1935   OBS 推流（RTMP）
   TCP 18855   网页、接口，以及 /hls/ 与 /rtc/ 的反向代理
+  TCP 18856   仅供 MediaMTX 回调，只监听 127.0.0.1，不对外
   UDP 8000   WebRTC 媒体通道（“WebRTC”通道必需）
   TCP 9997   MediaMTX 管理接口，只监听 127.0.0.1，不对外
 
@@ -153,8 +155,8 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
   ③ 端口被占用（窗口一闪而过 / 日志里 bind 失败）
      - 1935 被别的流媒体软件占用：关掉它，或改 mediamtx.yml 的 rtmpAddress，
        并同步改 tinycast.env 的 MEDIAMTX_RTMP_PUBLIC_BASE；
-     - 18855 被占用：改 tinycast.env 的 HTTP_ADDR，同时改 mediamtx.yml 里
-       authHTTPAddress 的端口。
+     - 18855 被占用：改 tinycast.env 的 HTTP_ADDR；如果同时配了 INTERNAL_ADDR，
+       mediamtx.yml 的 authHTTPAddress 要指向 INTERNAL_ADDR 的端口（默认 18856）。
 
   ④ 想确认 MediaMTX 收到了流
      浏览器打开 http://127.0.0.1:9997/v3/paths/list （只在本机可用），
@@ -176,15 +178,18 @@ Safari 上的 HLS.js 只能解 H.264，要看 H.265 就留在“自动”。
 
 八、安全提醒
 
-  - 回调接口 /internal/mtx/auth 默认只接受本机来源（127.0.0.1）。
+  - 回调接口 /internal/mtx/auth 默认只接受本机来源（127.0.0.1），并监听独立的
+    INTERNAL_ADDR=127.0.0.1:18856，公网端口 18855 上不注册这个路由。
     只有把 tinycast 与 MediaMTX 放进不同容器时才需要放宽
     MEDIAMTX_AUTH_ALLOWED_CIDRS，填 MediaMTX 所在的容器网段。
   - 如果 tinycast 前面还有 nginx / Caddy 之类的反向代理：
     把 TRUSTED_PROXIES 设成代理的地址（默认只有本机），并在代理上直接拒绝
     /internal/ 路径；这样公网请求不会落到鉴权回调上。
+    X-Forwarded-For 必须由代理覆写（nginx 用 $remote_addr），不要追加客户端自带的值，
+    否则来源 IP 可以被伪造，限流与每 IP 配额会失效。
     再加一层：tinycast.env 设 MEDIAMTX_AUTH_SECRET=一串随机值，并把
     mediamtx\mediamtx.yml 的 authHTTPAddress 改成
-    http://127.0.0.1:18855/internal/mtx/auth?secret=同一个值 。
+    http://127.0.0.1:18856/internal/mtx/auth?secret=同一个值 。
   - 推流令牌只在浏览器里生成，服务端只存 SHA-256 哈希，不会出现在房间列表里。
   - 包内的 mediamtx.exe 来自 MediaMTX v1.21.3 官方发行版。
 
