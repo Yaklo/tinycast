@@ -383,7 +383,7 @@ describe('LivePlayer', () => {
     expect(localStorage.getItem('tinycast.playMode')).toBe('webrtc')
   })
 
-  it('HLS 落后直播边缘时给出追平按钮，并显示直播延迟', async () => {
+  it('HLS 落后直播边缘时只显示直播延迟，不再给追平按钮', async () => {
     fetchPlayMock.mockResolvedValue(playResponse('hls'))
     const wrapper = mountPlayer()
     await flushPromises()
@@ -394,20 +394,16 @@ describe('LivePlayer', () => {
     await vi.advanceTimersByTimeAsync(1100)
     await flushPromises()
 
-    // 控制栏不再显示「延迟 X s · 追平」。
-    expect(wrapper.find('.controls .latency-chip').exists()).toBe(false)
+    // 追平入口已移除，落后时靠自动追平或控制栏的刷新按钮。
+    expect(wrapper.find('.latency-chip').exists()).toBe(false)
 
     await buttonByTitle(wrapper, '显示播放统计')?.trigger('click')
     await flushPromises()
 
     const stats = wrapper.find('.stats')
     expect(stats.text()).toContain('直播延迟')
-    const chip = stats.find('.stats-latency')
-    expect(chip.exists()).toBe(true)
-    expect(chip.text()).toContain('3.4')
-
-    await chip.trigger('click')
-    await flushPromises()
+    expect(stats.text()).toContain('3.4')
+    expect(stats.find('.latency-chip').exists()).toBe(false)
   })
 
   it('WebRTC 连上却收不到画面时自动切回 LL-HLS', async () => {

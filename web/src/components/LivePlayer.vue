@@ -902,7 +902,7 @@ async function startWebRTC(token: number): Promise<void> {
   }
 }
 
-/** 采样一次“落后直播边缘多少秒”，供统计面板与追平按钮使用。 */
+/** 采样一次“落后直播边缘多少秒”，供统计面板与自动追平使用。 */
 function syncLatency(): void {
   const video = videoEl.value
   // 清单记录的直播边缘位置 + 经过的时间 = 此刻的直播头，减去播放位置就是真实延迟。
@@ -1615,15 +1615,6 @@ onBeforeUnmount(() => {
 
       <div class="stats-facts">
         <p v-if="engineNotice" class="stats-note engine-notice">{{ engineNotice }}</p>
-        <button
-          v-if="mode === 'hls' && latencySec >= 2"
-          type="button"
-          class="latency-chip stats-latency"
-          title="画面落后于直播，点一下追到最新"
-          @click="seekLive"
-        >
-          延迟 {{ latencySec.toFixed(1) }}s · 追平
-        </button>
         <dl class="stats-grid">
           <template v-for="row in grid" :key="row.label">
             <dt>{{ row.label }}</dt>
@@ -1783,28 +1774,6 @@ onBeforeUnmount(() => {
   color: #fde68a;
   font-size: 12px;
   line-height: 1.6;
-}
-
-.latency-chip {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  border: 1px solid rgba(245, 158, 11, 0.55);
-  background: rgba(120, 53, 15, 0.85);
-  color: #fde68a;
-  font-size: 11.5px;
-  padding: 3px 10px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.latency-chip:hover {
-  background: rgba(146, 64, 14, 0.95);
-}
-
-/* 播放统计里的「延迟 X s · 追平」：只在这里出现，控制栏不再放。 */
-.stats-latency {
-  margin: 0 0 12px;
 }
 
 .volume-control {
