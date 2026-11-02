@@ -35,12 +35,10 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	// 走请求体上报时必须声明 application/json：跨站表单做不到这一点，
 	// 与 sameOriginRequest 一起把伪造人数的成本抬高。
-	if r.Method == http.MethodPost && r.URL.Query().Get("viewerId") == "" && r.ContentLength != 0 {
-		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if err != nil || mediaType != "application/json" {
-			writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "请求体需要使用 application/json")
-			return
-		}
+	if r.Method == http.MethodPost && r.URL.Query().Get("viewerId") == "" && r.ContentLength != 0 &&
+		!jsonContentType(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "请求体需要使用 application/json")
+		return
 	}
 	username := strings.TrimSpace(r.PathValue("username"))
 	viewerID, err := decodeViewerID(r)
@@ -61,9 +59,30 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
 		return
 	}
+	// 每房间 + 每客户端的不同 viewerId 上限：人数按 viewerId 去重，而 viewerId
+	// 由浏览器自己生成，不封顶时一个人换着 ID 刷心跳就能把人数顶到房间上限。
+	// 重复心跳命中的是同一个 viewerId，不占新配额，正常观众完全不受影响。
+	capKey := watchLimitKey(username, s.clientIP(r))
+	allowed, fresh := s.viewerCap.allow(capKey, viewerID)
+	if !allowed {
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "room_full", "同一网络观看该房间的人数已达上限，请稍后重试")
+		return
+	}
 	added, ok := s.hub.WatchChanged(view.Username, viewerID)
 	if !ok {
-		if view.ViewerCount >= hub.MaxViewersPerRoom {
+		// 房间刚好释放或被占满：撤回这次记账，别让失败的心跳白占配额。
+		if fresh {
+			s.viewerCap.forget(capKey, viewerID)
+		}
+		// 不能拿上面那份旧快照判断“是否满员”：并发心跳可能刚好把最后一个位置占满，
+		// 旧快照仍是 4999，会把 429 误报成 404。这里必须读一次最新状态。
+		current, exists := s.hub.Room(view.Username)
+		if !exists {
+			writeError(w, http.StatusNotFound, "room_not_found", "房间不存在或已释放")
+			return
+		}
+		if current.ViewerCount >= hub.MaxViewersPerRoom {
 			writeError(w, http.StatusTooManyRequests, "room_full", "该房间观看人数已达上限")
 			return
 		}
@@ -107,6 +126,9 @@ func (s *Server) handleUnwatch(w http.ResponseWriter, r *http.Request) {
 	if s.hub.Unwatch(username, viewerID) {
 		s.scheduleBroadcast()
 	}
+	// 主动离开也要释放 viewerCap 配额：否则 16 个旧 viewerId 会一直占到 TTL 过期，
+	// 同一网络后来的观众会看到本不该出现的 room_full。
+	s.viewerCap.forget(watchLimitKey(username, s.clientIP(r)), viewerID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -138,6 +160,15 @@ func sameOriginRequest(r *http.Request) bool {
 // IPv6 地址收敛到 /64，否则同一台机器整段地址轮流用等于没有限额。
 func watchLimitKey(username, ip string) string {
 	return username + "|" + eventStreamKey(ip)
+}
+
+// jsonContentType 判断请求体是否声明为 application/json（允许 charset 等参数）。
+//
+// 浏览器跨站的 no-cors 请求只能发 text/plain 之类的简单类型，拦掉非 JSON
+// 就把「用表单伪造请求」这条路堵死了；服务端调用方（MediaMTX、curl）都能正常声明。
+func jsonContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(value))
+	return err == nil && mediaType == "application/json"
 }
 
 func decodeViewerID(r *http.Request) (string, error) {

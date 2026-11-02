@@ -33,6 +33,15 @@ const (
 	// MaxViewersPerRoom 是单个房间的观看会话上限。
 	// 正常直播远达不到这个量级；设上限只是为了不让伪造的 viewerId 无限占内存。
 	MaxViewersPerRoom = 5000
+
+	// defaultStalePublisherTimeout 是"旧推流会话失效判定窗"的默认值。
+	//
+	// 巡检每个周期都会调用 ConfirmLive 刷新 publisher.lastConfirmed，正常直播里
+	// 这个时窗的年龄始终小于一个巡检周期；只有真的没人再推流时才会超过它。
+	// 唯一知道巡检间隔的组件是 monitor，它会用 SetStalePublisherTimeout 把窗口对齐到
+	// 几个周期；这里的默认值按默认 1 秒巡检取值，只服务于不经 monitor 的调用方
+	// （单元测试、将来可能的其它嵌入场景）。
+	defaultStalePublisherTimeout = 3 * time.Second
 )
 
 // publisher 是一条已经通过鉴权的推流身份。
@@ -43,6 +52,13 @@ type publisher struct {
 	sessionID string
 	ip        string
 	boundAt   time.Time
+	// lastConfirmed 是巡检最后一次确认"这条身份仍在推流"的时间。
+	//
+	// 用途见 Bind 的规则 3：断流后 1 秒内重连时，巡检还没来得及把房间打成 GRACE，
+	// 旧会话号仍然占着身份；靠这个时间判断旧会话是否真的已经失效。
+	// 零值表示"还没被确认过"，此时一律按新鲜处理——宁可拒绝一次重连，
+	// 也不能误伤一条正在推流的连接。
+	lastConfirmed time.Time
 }
 
 // room 是一间真实存在过的房间，只有推流成功（MediaMTX 中路径 ready）才会创建。
@@ -67,9 +83,11 @@ type Hub struct {
 	byToken    map[string]*publisher
 	rooms      map[string]*room
 
-	grace    time.Duration
-	seq      atomic.Uint64
-	watchers map[chan Snapshot]struct{}
+	grace time.Duration
+	seq   atomic.Uint64
+	// staleAfter 见 SetStalePublisherTimeout，为 0 时不做任何旧会话替换。
+	staleAfter time.Duration
+	watchers   map[chan Snapshot]struct{}
 }
 
 // New 创建一个以 grace 作为断流保留时长的 Hub。
@@ -80,8 +98,24 @@ func New(grace time.Duration) *Hub {
 		byToken:    make(map[string]*publisher),
 		rooms:      make(map[string]*room),
 		grace:      grace,
+		staleAfter: defaultStalePublisherTimeout,
 		watchers:   make(map[chan Snapshot]struct{}),
 	}
+}
+
+// SetStalePublisherTimeout 设置"旧推流会话多久没有被巡检确认就视为失效"的时间窗。
+//
+// 巡检组件（monitor）在启动时按自己的轮询间隔调用它；d <= 0 时退回默认值。
+// 这只是让断流后的重连少等一会儿，不会放宽"同一身份不能双推"：真正的推流每个
+// 巡检周期都会刷新 lastConfirmed，年龄永远落在窗口内，因此不可能被顶掉。
+func (h *Hub) SetStalePublisherTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultStalePublisherTimeout
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.staleAfter = d
 }
 
 // HashToken 返回推流令牌的 SHA-256 十六进制摘要。
@@ -141,12 +175,23 @@ func (h *Hub) Bind(in BindInput) BindResult {
 	//
 	// 缺少会话 ID 时也要拒绝：MediaMTX 正常都会带 id，空值只可能来自伪造请求；
 	// 旧代码要求双方都非空，反而给了“空 id 绕过并发限制”的口子。
+	//
+	// 例外：断流后 1 秒内重连时，巡检还没来得及把房间打成 GRACE，旧会话号仍然占着
+	// 身份，重连会被永久拒绝（控制接口不可用时尤其致命，巡检根本不会标记断流）。
+	// 因此以"最后一次确认仍在推流的时间"为据：旧会话超过 staleAfter 没有任何确认，
+	// 就认为它已经失效，允许新会话接管。正在推流的连接每个巡检周期都会被确认，
+	// 年龄永远落在窗口内，所以"同身份不能双推"的约束不变。
 	if rm, ok := h.rooms[username]; ok && rm.state == StateLive {
-		prev, hasPrev := h.byUsername[username]
-		if hasPrev && (prev.sessionID == "" || in.SessionID == "" || prev.sessionID != in.SessionID) {
-			return BindResult{
-				Reason:  ReasonAlreadyPublishing,
-				Message: "该身份正在推流中，请先停止现有的推流连接",
+		if prev, hasPrev := h.byUsername[username]; hasPrev {
+			sameSession := prev.sessionID != "" && in.SessionID != "" && prev.sessionID == in.SessionID
+			stale := h.staleAfter > 0 && !prev.lastConfirmed.IsZero() && now.Sub(prev.lastConfirmed) > h.staleAfter
+			// 没有会话 ID 的请求即使旧会话看起来已过期也不能接管：MediaMTX 一定会带 id，
+			// 空值只可能来自伪造，放行等于把"抢占身份"的口子重新打开。
+			if !sameSession && !(stale && in.SessionID != "") {
+				return BindResult{
+					Reason:  ReasonAlreadyPublishing,
+					Message: "该身份正在推流中，请先停止现有的推流连接",
+				}
 			}
 		}
 	}
@@ -184,6 +229,7 @@ func (h *Hub) Bind(in BindInput) BindResult {
 // ConfirmLive 把房间标记为 LIVE（推流已真正开始）。
 //
 // 首次调用会创建房间；GRACE 期间重推则恢复原房间并清除过期时间。
+// 每次调用都会刷新绑定的 lastConfirmed，这是 Bind 判断旧会话是否失效的依据。
 // 返回 true 表示状态发生了变化（用于决定是否广播快照）。
 func (h *Hub) ConfirmLive(username string, media *MediaInfo) bool {
 	h.mu.Lock()
@@ -199,6 +245,9 @@ func (h *Hub) ConfirmLive(username string, media *MediaInfo) bool {
 		// 就是需求允许的取舍。
 		return false
 	}
+	// 巡检看到 path 就绪 → 这条身份此刻确实在推流。
+	now := h.now()
+	pub.lastConfirmed = now
 	roomName := pub.roomName
 
 	rm, exists := h.rooms[username]
@@ -215,7 +264,7 @@ func (h *Hub) ConfirmLive(username string, media *MediaInfo) bool {
 	// 若无条件刷新 startedAt，首页的"已开播时长"就会永远停在 0。
 	changed := rm.state != StateLive || !exists
 	if changed {
-		rm.startedAt = h.now()
+		rm.startedAt = now
 		// 只在状态变化时写展示名：直播中的房间若被后续鉴权换了绑定，
 		// 巡检每秒调用本方法，无条件覆盖会把攻击者选的标题写上去。
 		rm.roomName = roomName
@@ -401,10 +450,22 @@ func (h *Hub) Rooms() []RoomView {
 }
 
 // Snapshot 生成一份完整快照并递增版本号。
+//
+// 用写锁而不是读锁：版本号的分配必须与快照内容、以及 Broadcast 的投递建立全序，
+// 否则两个快照可能"先拿到大号、后看到旧内容"，订阅者也就无法再用 seq 判断新旧。
+// 临界区只是遍历几百个房间，代价可以忽略。
 func (h *Hub) Snapshot() Snapshot {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
+	return h.snapshotLocked()
+}
+
+// snapshotLocked 组装快照并递增版本号，调用方必须已经持有写锁。
+//
+// 拆出来是为了让 Broadcast 能在同一把锁里完成"分配 seq + 生成快照 + 投递"，
+// 同时避免 RWMutex 不可重入导致的自我死锁。
+func (h *Hub) snapshotLocked() Snapshot {
 	snap := Snapshot{Seq: h.seq.Add(1), ServerTime: h.now().UnixMilli()}
 	snap.Rooms = make([]RoomView, 0, len(h.rooms))
 	for username := range h.rooms {
@@ -423,16 +484,20 @@ func (h *Hub) Snapshot() Snapshot {
 //
 // 房间数量在个人直播场景下很少，直接"全量广播快照"比维护增量补丁简单得多，
 // 前端也永远只会看到一致的完整状态。
+//
+// 分配 seq、生成快照、投递三步必须在同一把写锁内完成：早先的写法先 Snapshot()
+// （RLock 内自增 seq）再单独加锁投递，两个并发调用会让订阅者先收到 seq 7 再收到
+// seq 6，前端再也无法用 seq 判断新旧。注意不能在这里调用 Snapshot()——
+// RWMutex 不可重入，会自我死锁。
 func (h *Hub) Broadcast() {
-	// Snapshot 内部要拿 RLock，必须在加锁前调用。
-	snap := h.Snapshot()
-
 	// 发送期间必须持锁：Subscribe / 注销函数会并发增删并 close 通道，
 	// 无锁遍历 map 会触发 runtime 的 "concurrent map iteration and map write"
 	// 直接退出进程，向已关闭通道发送则会 panic。
 	// 发送是非阻塞的（缓冲满就丢帧），持锁时间可以忽略。
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	snap := h.snapshotLocked()
 	for ch := range h.watchers {
 		select {
 		case ch <- snap:

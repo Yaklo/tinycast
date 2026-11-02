@@ -1,10 +1,13 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +15,8 @@ import (
 	"tinycast/internal/hub"
 	"tinycast/internal/mtx"
 )
+
+const testToken = "MPA49PxJv0mJd4Wq7yTn1sB8Rc2hVfLgXe6uZa9Q"
 
 // fakeMediaMTX 是一个可随时改写返回值的 /v3/paths/list 假服务。
 type fakeMediaMTX struct {
@@ -67,7 +72,7 @@ func newTestMonitor(t *testing.T, grace time.Duration) (*Monitor, *hub.Hub, *fak
 
 func bind(t *testing.T, h *hub.Hub) {
 	t.Helper()
-	res := h.Bind(hub.BindInput{Username: "alex", RoomName: "测试直播", Token: "MPA49PxJv0mJd4Wq7yTn1sB8Rc2hVfLgXe6uZa9Q", SessionID: "s1"})
+	res := h.Bind(hub.BindInput{Username: "alex", RoomName: "测试直播", Token: testToken, SessionID: "s1"})
 	if !res.Allowed {
 		t.Fatalf("鉴权失败：%s", res.Reason)
 	}
@@ -218,7 +223,7 @@ func TestTickReleasesExpiredGraceAndStaleViewers(t *testing.T) {
 		t.Fatal("保留期结束后房间应被释放")
 	}
 	// 身份也一并释放：原用户名+令牌可以重新绑定。
-	res := h.Bind(hub.BindInput{Username: "alex", RoomName: "新房间", Token: "MPA49PxJv0mJd4Wq7yTn1sB8Rc2hVfLgXe6uZa9Q", SessionID: "s2"})
+	res := h.Bind(hub.BindInput{Username: "alex", RoomName: "新房间", Token: testToken, SessionID: "s2"})
 	if !res.Allowed {
 		t.Fatalf("释放后应能重新鉴权：%s", res.Reason)
 	}
@@ -313,6 +318,60 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run 应在 context 取消后退出")
+	}
+}
+
+// Monitor 必须把 hub 的"旧推流会话失效窗口"对齐到自己的巡检间隔。
+//
+// 回归背景（审查 M5）：断流后 1 秒内重连时房间仍是 LIVE、旧 sessionID 未被清，
+// Bind 会一直回 already_publishing。若沿用 hub 的默认 3 秒窗口，重连要白等 3 秒；
+// 控制接口不可用时巡检根本不会标记断流，窗口不缩短就等于永久拒绝。
+func TestNewAlignsStalePublisherWindowToInterval(t *testing.T) {
+	m, h, fake := newTestMonitor(t, time.Minute) // Interval=10ms → 窗口 50ms
+	bind(t, h)
+	fake.set(pathsJSON(livePath))
+	m.Tick(context.Background())
+
+	// 巡检刚确认过 alex 在推流，此后不再巡检；等过 5 个周期后重连应该被放行。
+	time.Sleep(70 * time.Millisecond)
+	res := h.Bind(hub.BindInput{Username: "alex", RoomName: "测试直播", Token: testToken, SessionID: "s2"})
+	if !res.Allowed {
+		t.Fatalf("超过 3 个巡检周期未确认后应允许重连，实际 %s", res.Reason)
+	}
+}
+
+// 默认 LOG_LEVEL=error 时，降级与恢复都必须以 Error 级别落到日志里：
+// 否则运维只看得到"已降级"，永远等不到"已恢复"，会误判控制接口还挂着。
+func TestRecoveryLoggedAtDefaultErrorLevel(t *testing.T) {
+	fake := &fakeMediaMTX{code: http.StatusOK}
+	fake.set(`{"itemCount":0,"pageCount":0,"items":[]}`)
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+	h := hub.New(time.Minute)
+	m := New(h, mtx.New(srv.URL, "", ""), Options{
+		App:            "live",
+		Interval:       10 * time.Millisecond,
+		ViewerTimeout:  time.Minute,
+		BindingTimeout: time.Minute,
+		Logger:         logger,
+	})
+
+	fake.fail()
+	for i := 0; i < maxAPIFailures; i++ {
+		m.Tick(context.Background())
+	}
+	if !strings.Contains(buf.String(), "降级") {
+		t.Fatalf("降级日志应在默认级别下可见，实际 %q", buf.String())
+	}
+
+	buf.Reset()
+	fake.set(`{"itemCount":0,"pageCount":0,"items":[]}`)
+	m.Tick(context.Background())
+	if !strings.Contains(buf.String(), "已恢复") {
+		t.Fatalf("恢复日志应在默认 LOG_LEVEL=error 下可见，实际 %q", buf.String())
 	}
 }
 

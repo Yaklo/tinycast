@@ -47,6 +47,9 @@ type Server struct {
 	// 且按「房间 + 客户端」计数：一个人刷某个房间不应影响其它观众。
 	watchLimiter   *fixedWindowLimiter
 	unwatchLimiter *fixedWindowLimiter
+	// viewerCap 限制「每房间 + 每客户端」的不同 viewerId 数量：
+	// viewerId 由浏览器生成，不封顶时一个人换 ID 就能刷出任意人数。
+	viewerCap *viewerCap
 
 	// 观看人数变化可能每秒来很多次；把广播合并成最多每 100ms 一次，
 	// 避免一个廉价请求放大成对每个 SSE 订阅者的全量快照。
@@ -65,12 +68,18 @@ func New(h *hub.Hub, cfg *config.Config, log *slog.Logger) *Server {
 		mediaByIP:      make(map[string]int),
 		watchLimiter:   newFixedWindowLimiter(240, 10*time.Second),
 		unwatchLimiter: newFixedWindowLimiter(240, 10*time.Second),
+		// 与 hub 的观看会话用同一个超时：两边忘记 viewerId 的时机一致，
+		// 观众重新进入时不会被残留条目误判成超限。
+		viewerCap: newViewerCap(maxViewersPerRoomIP, cfg.ViewerTimeout),
 	}
 
 	if cfg.MediaMTX.WHEPProxyTarget != "" {
 		if proxy, err := newMediaProxy(cfg.MediaMTX.WHEPProxyTarget, "/rtc", true); err != nil {
 			log.Error("MEDIAMTX_WHEP_PROXY_TARGET 解析失败，已关闭 WebRTC 播放", "target", cfg.MediaMTX.WHEPProxyTarget, "err", err)
 		} else {
+			// 反代内部的 log 默认走标准库打到 stderr：加了写期限之后 i/o timeout
+			// 属于预期事件，统一交给 slog，别让它们绕过日志级别与结构化字段。
+			proxy.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelWarn)
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 				log.Warn("WebRTC 信令代理失败", "path", r.URL.Path, "err", err)
 				writeError(w, http.StatusBadGateway, "mediamtx_unreachable", "无法连接流媒体服务器")
@@ -85,6 +94,8 @@ func New(h *hub.Hub, cfg *config.Config, log *slog.Logger) *Server {
 		if proxy, err := newMediaProxy(cfg.MediaMTX.HLSProxyTarget, "/hls", true); err != nil {
 			log.Error("MEDIAMTX_HLS_PROXY_TARGET 解析失败，已关闭 HLS 播放", "target", cfg.MediaMTX.HLSProxyTarget, "err", err)
 		} else {
+			// 同上：流式写超时是预期事件，走 slog 而不是标准库 log。
+			proxy.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelWarn)
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 				log.Warn("HLS 代理失败", "path", r.URL.Path, "err", err)
 				writeError(w, http.StatusBadGateway, "mediamtx_unreachable", "无法连接流媒体服务器")
@@ -271,6 +282,8 @@ func (s *Server) mediaProxyHandler(proxy *httputil.ReverseProxy, prefix string) 
 			writeError(w, http.StatusServiceUnavailable, "too_many_streams", "媒体请求过多，请稍后重试")
 			return
 		}
+		// 与 events.go 的 SSE 上限一致：IPv6 收敛到 /64，
+		// 否则同一台机器换地址就能绕开单 IP 的并发配额。
 		ip := eventStreamKey(s.clientIP(r))
 		if !s.acquireMediaSlot(ip) {
 			<-s.mediaSlots
@@ -282,7 +295,9 @@ func (s *Server) mediaProxyHandler(proxy *httputil.ReverseProxy, prefix string) 
 			s.releaseMediaSlot(ip)
 			<-s.mediaSlots
 		}()
-		proxy.ServeHTTP(w, r)
+		// 流式拷贝时每次写都要有期限：完全停滞的客户端不会一直占着
+		// goroutine、媒体槽与单 IP 配额。SSE 走的是 events.go 里独立的一套期限。
+		proxy.ServeHTTP(newMediaDeadlineWriter(w, mediaWriteTimeout), r)
 	})
 }
 

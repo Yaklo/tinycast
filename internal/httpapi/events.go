@@ -55,11 +55,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer release()
 
 	// 断线后 3 秒重连，同时立即补一帧当前状态。
+	// Subscribe 与 Snapshot 不是原子操作，队列里可能已经排着比首帧更新的快照；
+	// 用 lastSeq 保证客户端看到的 seq 严格递增，不会先收到 6 再退回 5。
+	first := s.hub.Snapshot()
+	lastSeq := first.Seq
 	setDeadline()
 	if _, err := io.WriteString(w, "retry: 3000\n\n"); err != nil {
 		return
 	}
-	if err := writeSnapshot(w, s.hub.Snapshot()); err != nil {
+	if err := writeSnapshot(w, first); err != nil {
 		return
 	}
 	flusher.Flush()
@@ -75,10 +79,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
+			if snap.Seq <= lastSeq {
+				continue
+			}
 			setDeadline()
 			if err := writeSnapshot(w, snap); err != nil {
 				return
 			}
+			lastSeq = snap.Seq
 			flusher.Flush()
 		case <-keepalive.C:
 			// 注释行不会被前端当作事件，只用来保活并探测断开。

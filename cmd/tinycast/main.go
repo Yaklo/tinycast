@@ -91,6 +91,11 @@ func run() (err error) {
 			cfg.InternalAddr = ""
 		}
 	}
+	// 内部回调端口对外监听且没有共享密钥时，直接拒绝启动：
+	// 继续跑下去等于把推流鉴权暴露给整个网段。
+	if err := validateInternalAddr(cfg); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -113,13 +118,10 @@ func run() (err error) {
 	if cfg.MediaMTX.AuthSecret == "" && cfg.InternalAddr == "" {
 		logger.Error("未配置 MEDIAMTX_AUTH_SECRET 且回调与公网端口共用，鉴权回调仅依赖来源 IP 白名单保护")
 	}
+	// 「非回环 + 空密钥」已经在 validateInternalAddr 里直接失败，
+	// 能走到这里的只剩配了密钥的情况，提醒运维把端口访问范围收窄。
 	if cfg.InternalAddr != "" && !isLoopbackListenAddr(cfg.InternalAddr) {
-		if cfg.MediaMTX.AuthSecret == "" {
-			logger.Error("内部回调端口监听在非回环地址，且未配置 MEDIAMTX_AUTH_SECRET；同网段任何人都能伪造推流鉴权",
-				"internalAddr", cfg.InternalAddr, "hint", "把 INTERNAL_ADDR 改回 127.0.0.1:18856，或设置 MEDIAMTX_AUTH_SECRET")
-		} else {
-			logger.Warn("内部回调端口监听在非回环地址，请确认只有 MediaMTX 能访问该端口", "internalAddr", cfg.InternalAddr)
-		}
+		logger.Warn("内部回调端口监听在非回环地址，请确认只有 MediaMTX 能访问该端口", "internalAddr", cfg.InternalAddr)
 	}
 	if cfg.MediaMTX.WHEPProxyTarget == "" && cfg.MediaMTX.HLSProxyTarget == "" {
 		logger.Error("未配置 MediaMTX 播放代理地址，播放需要由外部反向代理转发 /rtc/ 与 /hls/")

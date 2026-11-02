@@ -234,3 +234,59 @@ func TestValidMediaPathRejectsControlChars(t *testing.T) {
 		t.Fatal("正常路径不应被拒绝")
 	}
 }
+
+// IPv6 的媒体槽必须按 /64 收敛：否则同一台机器换地址就能开满全部慢连接。
+func TestMediaSlotAggregatesIPv6By64(t *testing.T) {
+	if eventStreamKey("2001:db8:1:2::1") != eventStreamKey("2001:db8:1:2:ffff::9") {
+		t.Fatal("同一 /64 内的地址应收敛到同一个键")
+	}
+
+	up := &fakeUpstream{}
+	srvUp := httptest.NewServer(up)
+	defer srvUp.Close()
+
+	srv, _ := newTestServer(t, func(c *config.Config) {
+		c.MediaMTX.HLSProxyTarget = srvUp.URL
+		c.TrustedProxies = mustCIDRs(t, "127.0.0.0/8")
+	})
+	for i := 0; i < maxMediaPerIP; i++ {
+		if !srv.acquireMediaSlot(eventStreamKey("2001:db8:1:2::1")) {
+			t.Fatalf("第 %d 条连接不应被拒绝", i+1)
+		}
+	}
+
+	// 同一 /64 内的另一个地址必须算成同一个客户端，反代路径上直接 503。
+	req := httptest.NewRequest(http.MethodGet, "/hls/live/alex/index.m3u8", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("X-Forwarded-For", "2001:db8:1:2:ffff::9")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("同一 /64 内换地址不应绕过配额，实际 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 换个 /64 立刻就能播。
+	req = httptest.NewRequest(http.MethodGet, "/hls/live/alex/index.m3u8", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("X-Forwarded-For", "2001:db8:1:3::1")
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusServiceUnavailable {
+		t.Fatalf("不同 /64 不应受影响，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 写期限会让 i/o timeout 变成预期事件：反代内部的 log 必须走 slog，
+// 否则这些噪声会绕过日志级别直接打到 stderr。
+func TestMediaProxiesLogThroughSlog(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	if srv.whep == nil || srv.hls == nil {
+		t.Fatal("测试配置应同时启用 WHEP 与 HLS 反代")
+	}
+	if srv.whep.ErrorLog == nil {
+		t.Error("WHEP 反代的 ErrorLog 未接入 slog")
+	}
+	if srv.hls.ErrorLog == nil {
+		t.Error("HLS 反代的 ErrorLog 未接入 slog")
+	}
+}

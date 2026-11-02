@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -432,6 +433,7 @@ func TestAuthUsesForwardedIPOnlyBehindTrustedProxy(t *testing.T) {
 	send := func(remote, forwarded string) int {
 		req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth?secret=s3cret", strings.NewReader(authBody("read", "live/alex", "", "s1")))
 		req.RemoteAddr = remote
+		req.Header.Set("Content-Type", "application/json")
 		if forwarded != "" {
 			req.Header.Set("X-Forwarded-For", forwarded)
 		}
@@ -477,6 +479,7 @@ func TestAuthSecret(t *testing.T) {
 	// 查询参数里带密钥。
 	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth?secret=s3cret", strings.NewReader(authBody("read", "live/alex", "", "s1")))
 	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -486,6 +489,7 @@ func TestAuthSecret(t *testing.T) {
 	// 也可以放在请求头里。
 	req = httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("read", "live/alex", "", "s1")))
 	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Tinycast-Secret", "s3cret")
 	rr = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
@@ -714,9 +718,139 @@ func TestInternalAddrRemovesPublicAuthRoute(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("publish", "live/alex", "token="+testToken, "s1")))
 	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	srv.InternalHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("内部端口应处理回调，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 鉴权回调是服务端到服务端的请求：MediaMTX 既不发 Sec-Fetch-Site 也不发 Origin。
+// 浏览器不一样，跨站写入一定带其中之一，所以同源检查能把网页挡在解析之前。
+func TestMTXAuthRejectsCrossSiteRequests(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	h := srv.InternalHandler()
+
+	post := func(headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("publish", "live/alex", "token="+testToken, "s1")))
+		req.RemoteAddr = "127.0.0.1:50000"
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, headers := range []map[string]string{
+		{"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"},
+		{"Content-Type": "application/json; charset=utf-8", "Sec-Fetch-Site": "same-site"},
+		{"Content-Type": "application/json", "Origin": "https://evil.example"},
+	} {
+		rec := post(headers)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("跨站回调应被拒绝（%v），实际 %d %s", headers, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "cross_origin") {
+			t.Fatalf("应返回 cross_origin，实际 %s", rec.Body.String())
+		}
+	}
+
+	// 同源页面（没有 Sec-Fetch-Site 的老浏览器）与 MediaMTX 服务端请求都应放行。
+	if rec := post(map[string]string{"Content-Type": "application/json", "Origin": "http://example.com"}); rec.Code != http.StatusOK {
+		t.Fatalf("同源请求应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusOK {
+		t.Fatalf("服务端回调应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 跨站表单只能发 text/plain 之类的简单类型，所以非 JSON 的请求体必须在解析前丢掉。
+func TestMTXAuthRequiresJSONContentType(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+
+	for _, contentType := range []string{"", "text/plain", "application/x-www-form-urlencoded", "application/jsonx"} {
+		req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("publish", "live/alex", "token="+testToken, "s1")))
+		req.RemoteAddr = "127.0.0.1:50000"
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		rec := httptest.NewRecorder()
+		srv.InternalHandler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("Content-Type=%q 应返回 415，实际 %d %s", contentType, rec.Code, rec.Body.String())
+		}
+	}
+	if _, ok := h.Room("alex"); ok {
+		t.Fatal("被拒绝的请求不应真的建立推流会话")
+	}
+
+	// 带 charset 的 JSON 是 MediaMTX/curl 的常见写法，不能误伤。
+	req := httptest.NewRequest(http.MethodPost, "/internal/mtx/auth", strings.NewReader(authBody("publish", "live/alex", "token="+testToken, "s1")))
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	rec := httptest.NewRecorder()
+	srv.InternalHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("带 charset 的 JSON 应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 人数按 viewerId 去重，而 viewerId 由浏览器生成：同一房间、同一客户端
+// 换着 ID 刷心跳必须封顶，否则一个人就能把人数顶到房间上限。
+func TestWatchCapsViewersPerClient(t *testing.T) {
+	srv, h := newTestServer(t, nil)
+	mustLive(t, h, "alex")
+
+	post := func(remote, viewer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/rooms/alex/watch", strings.NewReader(`{"viewerId":"`+viewer+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < maxViewersPerRoomIP; i++ {
+		if rec := post("127.0.0.1:50000", fmt.Sprintf("viewer-%d", i)); rec.Code != http.StatusOK {
+			t.Fatalf("第 %d 个观众应放行，实际 %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	// 满额后重复心跳仍然放行，且不增加人数。
+	if rec := post("127.0.0.1:50000", "viewer-0"); rec.Code != http.StatusOK {
+		t.Fatalf("重复心跳应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if view, ok := h.Room("alex"); !ok || view.ViewerCount != maxViewersPerRoomIP {
+		t.Fatalf("重复心跳不应增加人数，实际 %+v", view)
+	}
+
+	rec := post("127.0.0.1:50000", "viewer-over")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("超限的新 viewerId 应返回 429，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "room_full") {
+		t.Fatalf("应返回 room_full 错误码，实际 %s", rec.Body.String())
+	}
+	if view, ok := h.Room("alex"); !ok || view.ViewerCount != maxViewersPerRoomIP {
+		t.Fatalf("超限请求不应计入人数，实际 %+v", view)
+	}
+
+	// 主动离开必须立刻释放 viewerCap 配额，不能等 TTL：否则同一网络的新观众
+	// 在旧 viewerId 过期前都会看到 room_full。
+	req := httptest.NewRequest(http.MethodDelete, "/api/rooms/alex/watch?viewerId=viewer-0", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("主动离开应返回 204，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post("127.0.0.1:50000", "viewer-over"); rec.Code != http.StatusOK {
+		t.Fatalf("释放配额后新观众应放行，实际 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 其它网络不受影响。
+	if rec := post("198.51.100.7:50000", "viewer-other"); rec.Code != http.StatusOK {
+		t.Fatalf("其它客户端应放行，实际 %d %s", rec.Code, rec.Body.String())
 	}
 }

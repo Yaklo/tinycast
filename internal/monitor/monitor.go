@@ -22,6 +22,14 @@ import (
 // 避免 MediaMTX 已经挂掉而页面一直显示“正在直播”。
 const maxAPIFailures = 5
 
+// staleWindowFactor 把 hub 的"旧推流会话失效判定窗"对齐到巡检间隔。
+//
+// 断流后重连时，巡检可能还没来得及把房间打成 GRACE，旧会话号仍然占着身份；
+// hub 靠"最后一次确认仍在推流的时间"判断旧会话是否已经失效。至少要几个周期
+// 没有任何确认，才能断定旧连接真的不在了；单次 Paths() 自己就可能阻塞 3 秒，
+// 因此窗口不能只留一个周期，取 5 个周期给接口延迟与重试留出余量。
+const staleWindowFactor = 5
+
 type Monitor struct {
 	hub            *hub.Hub
 	client         *mtx.Client
@@ -32,6 +40,8 @@ type Monitor struct {
 	logger         *slog.Logger
 	failures       int
 	degraded       bool
+	// degradedAt 记录进入降级的时间，只用于恢复日志里报出降级时长。
+	degradedAt time.Time
 }
 
 // Options 汇总 Monitor 的可调参数。
@@ -53,6 +63,13 @@ func New(h *hub.Hub, client *mtx.Client, opts Options) *Monitor {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.Interval <= 0 {
+		// 防御性兜底：time.NewTicker(0) 会 panic，而 hub 的失效窗口也会退化成 0。
+		opts.Interval = time.Second
+	}
+	// 只有 Monitor 知道真实的巡检间隔，由它把 hub 的失效窗口对齐到周期上：
+	// 正在推流的连接每个周期都会被确认，年龄永远落在窗口内，不会被误判为旧会话。
+	h.SetStalePublisherTimeout(staleWindowFactor * opts.Interval)
 	return &Monitor{
 		hub:            h,
 		client:         client,
@@ -124,6 +141,7 @@ func (m *Monitor) Tick(ctx context.Context) bool {
 			m.logger.Warn("拉取 MediaMTX 推流清单失败，本轮保持现状", "err", err)
 		case m.failures >= maxAPIFailures && !m.degraded:
 			m.degraded = true
+			m.degradedAt = time.Now()
 			n := 0
 			for _, room := range m.hub.Rooms() {
 				if room.State == hub.StateLive && m.hub.MarkGrace(room.Username) {
@@ -140,8 +158,16 @@ func (m *Monitor) Tick(ctx context.Context) bool {
 		}
 	} else {
 		if m.degraded {
-			m.logger.Info("MediaMTX 控制接口已恢复")
+			// 与降级日志同级（Error）而不是 Info：默认 LOG_LEVEL=error 会把 Info 丢掉，
+			// 运维只会看到"已降级"却永远等不到"已恢复"，误以为控制接口还挂着。
+			// 这里只改日志级别，降级/恢复的判断逻辑没有变化。
+			attrs := []any{"failures", m.failures}
+			if !m.degradedAt.IsZero() {
+				attrs = append(attrs, "degraded_for", time.Since(m.degradedAt).Round(time.Second).String())
+			}
+			m.logger.Error("MediaMTX 控制接口已恢复，房间状态重新按真实清单同步", attrs...)
 			m.degraded = false
+			m.degradedAt = time.Time{}
 		}
 		m.failures = 0
 		changed = m.syncPaths(paths) || changed

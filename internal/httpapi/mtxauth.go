@@ -58,6 +58,21 @@ func (s *Server) handleMTXAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "ip_forbidden", "鉴权回调只允许内网来源")
 		return
 	}
+	// 回调本身是服务端到服务端的请求：MediaMTX 既不发 Sec-Fetch-Site 也不发 Origin，
+	// sameOriginRequest 会直接放行。真正要挡的是浏览器：跨站页面没法伪造
+	// Sec-Fetch-Site，而 no-cors 请求只能发 text/plain，下面的 Content-Type
+	// 校验会把它拦在解析之前。两者一起用，内部端口即便暴露给同网段，
+	// 也无法被一个网页当成「伪造推流身份」的跳板。
+	if !sameOriginRequest(r) {
+		s.log.Error("拒绝跨站来源的鉴权回调", "remote", remote, "site", r.Header.Get("Sec-Fetch-Site"), "origin", r.Header.Get("Origin"))
+		writeError(w, http.StatusForbidden, "cross_origin", "鉴权回调只接受服务端请求")
+		return
+	}
+	if !jsonContentType(r.Header.Get("Content-Type")) {
+		s.log.Error("拒绝缺少 JSON Content-Type 的鉴权回调", "remote", remote, "contentType", r.Header.Get("Content-Type"))
+		writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "请求体需要使用 application/json")
+		return
+	}
 
 	var payload mtxAuthPayload
 	if r.Body != nil {
