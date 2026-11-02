@@ -1,6 +1,9 @@
 # 本地 Go 工具链与构建缓存（由 scripts/dev-env.sh 建立）
 .tools/
 
+# 临时文档、审计报告与排查资料（不进入版本库）
+/.tmp/
+
 # Go 构建产物
 /bin/
 # 发布产物（tar.gz / zip / SHA256SUMS）
