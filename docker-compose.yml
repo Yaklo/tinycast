@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     environment:
       HTTP_ADDR: ":18855"
+      INTERNAL_ADDR: "0.0.0.0:18856"
       LOG_FILE: /var/log/tinycast/tinycast.log
       LOG_LEVEL: ${LOG_LEVEL:-error}
       LOG_CONSOLE_LEVEL: ${LOG_CONSOLE_LEVEL:-}
@@ -49,7 +50,7 @@ services:
     restart: unless-stopped
     environment:
       # 与 tinycast 用同一份回调密钥；为空时只依赖容器网络内的来源白名单
-      MTX_AUTHHTTPADDRESS: "http://tinycast:18855/internal/mtx/auth?secret=${MEDIAMTX_AUTH_SECRET:-}"
+      MTX_AUTHHTTPADDRESS: "http://tinycast:18856/internal/mtx/auth?secret=${MEDIAMTX_AUTH_SECRET:-}"
     volumes:
       - ./deploy/mediamtx/mediamtx.docker.yml:/mediamtx.yml:ro
     ports:

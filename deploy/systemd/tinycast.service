@@ -2,13 +2,15 @@
 Description=TinyCast 直播业务后端
 Documentation=https://github.com/Yaklo/tinycast
 After=network-online.target mediamtx.service
-Wants=network-online.target
+Wants=network-online.target mediamtx.service
 
 [Service]
 Type=simple
 User=tinycast
 Group=tinycast
-EnvironmentFile=-/etc/tinycast/tinycast.env
+# 不要用 - 前缀：缺配置时会静默回落，导致 18856 没人监听、推流全部失败
+EnvironmentFile=/etc/tinycast/tinycast.env
+WorkingDirectory=/var/lib/tinycast
 ExecStart=/usr/local/bin/tinycast
 Restart=always
 RestartSec=2
@@ -22,7 +24,8 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadWritePaths=/var/log/tinycast
+# 自动创建 /var/log/tinycast 并设好属主，避免目录缺失导致 226/NAMESPACE
+LogsDirectory=tinycast
 StateDirectory=tinycast
 LimitNOFILE=65535
 

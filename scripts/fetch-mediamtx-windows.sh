@@ -16,6 +16,12 @@ CACHE_DIR=".tools/mediamtx"
 CACHE="${CACHE_DIR}/${ASSET}"
 DEST="bin/windows-amd64/mediamtx"
 
+# 官方 GitHub release 的校验和。只内置验证过的版本；换版本时这里留空。
+EXPECTED_SHA256=""
+if [[ "$VERSION" == "1.21.3" ]]; then
+  EXPECTED_SHA256="b2f5246b07cb72961df03b8d5e8cad43dc657bcf3f49a87bb031bdf22721af74"
+fi
+
 mkdir -p "$CACHE_DIR" "$DEST"
 
 if [[ ! -f "$CACHE" ]]; then
@@ -36,6 +42,26 @@ if [[ ! -f "$CACHE" ]]; then
     exit 1
   fi
 fi
+
+verify_cache() {
+  if [[ -z "$EXPECTED_SHA256" ]]; then
+    echo "==> 未内置 $ASSET 的校验和，跳过校验"
+    return 0
+  fi
+  local got
+  if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "$CACHE" | awk '{print $1}')
+  else
+    got=$(shasum -a 256 "$CACHE" | awk '{print $1}')
+  fi
+  if [[ "$got" != "$EXPECTED_SHA256" ]]; then
+    rm -f "$CACHE"
+    echo "校验和不匹配：$ASSET（期望 $EXPECTED_SHA256，实际 $got）。已删除缓存，请重跑或手动下载。" >&2
+    exit 1
+  fi
+  echo "==> 校验和通过"
+}
+verify_cache
 
 echo "==> 解压 $CACHE"
 python3 - "$CACHE" "$DEST" <<'PY'

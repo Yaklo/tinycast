@@ -44,9 +44,9 @@ rtsp: no
 moq: no
 
 # 所有推流/播放请求先问后端；后端按用户名 + 令牌判断能否推流。
-# 改 tinycast 的 HTTP_ADDR 时必须同步改这里的端口；启动时 tinycast 会自检并报错。
+# 端口要与 tinycast 的 INTERNAL_ADDR 一致（未配置时是 HTTP_ADDR）；启动时会自检并报错。
 authMethod: http
-authHTTPAddress: http://127.0.0.1:18855/internal/mtx/auth
+authHTTPAddress: http://127.0.0.1:18856/internal/mtx/auth
 
 # 任何路径都走 all_others，不预创建房间
 paths:

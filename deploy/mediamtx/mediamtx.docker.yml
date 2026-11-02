@@ -35,8 +35,8 @@ rtsp: no
 moq: no
 
 authMethod: http
-# 改 tinycast 的 HTTP_ADDR 时必须同步改这里的端口；启动时 tinycast 会自检并报错。
-authHTTPAddress: http://tinycast:18855/internal/mtx/auth
+# 端口要与 tinycast 的 INTERNAL_ADDR 一致；启动时会自检并报错。
+authHTTPAddress: http://tinycast:18856/internal/mtx/auth
 
 paths:
   all_others:

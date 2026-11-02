@@ -20,7 +20,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> 启动后端 http://127.0.0.1:18855"
+# 与 deploy/mediamtx/mediamtx.yml 的 authHTTPAddress 保持一致：
+# 回调走独立端口，公网端口不再暴露 /internal/ 路由。
+export INTERNAL_ADDR="${INTERNAL_ADDR:-127.0.0.1:18856}"
+
+echo "==> 启动后端 http://127.0.0.1:18855（回调 127.0.0.1:18856）"
 go run ./cmd/tinycast &
 SERVER_PID=$!
 

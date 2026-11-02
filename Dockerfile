@@ -41,4 +41,6 @@ COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/tinycast/
 COPY --from=build /out/tinycast /usr/local/bin/tinycast
 USER tinycast
 EXPOSE 18855
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:18855/api/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/tinycast"]

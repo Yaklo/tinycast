@@ -42,7 +42,7 @@ cp deploy/mediamtx/mediamtx.yml "$STAGE/mediamtx/mediamtx.yml"
 cp "$OUTDIR/mediamtx/mediamtx" "$STAGE/mediamtx/mediamtx"
 cp "$OUTDIR/mediamtx/LICENSE" "$STAGE/mediamtx/LICENSE"
 cp deploy/systemd/tinycast.service deploy/systemd/mediamtx.service "$STAGE/systemd/"
-chmod +x "$STAGE/tinycast" "$STAGE/start.sh" "$STAGE/mediamtx/mediamtx"
+cp deploy/systemd/tinycast.env.example "$STAGE/systemd/tinycast.env.example"
 
 cat > "$STAGE/version.txt" <<EOF
 version:   $VERSION
@@ -50,6 +50,12 @@ commit:    $COMMIT
 buildTime: $BUILD_TIME
 go:        $(go version | awk '{print $3}')
 EOF
+
+# 源文件在 Windows 挂载点上常是 0777，这里显式收紧权限后再打包。
+chmod 755 "$STAGE/tinycast" "$STAGE/start.sh" "$STAGE/mediamtx/mediamtx"
+chmod 644 "$STAGE"/LICENSE "$STAGE"/README.md "$STAGE"/THIRD-PARTY-NOTICES.md \
+  "$STAGE"/tinycast.env "$STAGE"/version.txt "$STAGE"/mediamtx/mediamtx.yml \
+  "$STAGE"/mediamtx/LICENSE "$STAGE"/systemd/*
 
 mkdir -p "$DIST"
 EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || date +%s)}"

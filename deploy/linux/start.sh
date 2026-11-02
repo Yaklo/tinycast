@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+if [[ ! -x tinycast ]]; then
+  echo "缺少 tinycast，请确认压缩包已完整解压。" >&2
+  exit 1
+fi
 if [[ ! -x mediamtx/mediamtx ]]; then
   echo "缺少 mediamtx/mediamtx，请确认压缩包已完整解压。" >&2
   exit 1
@@ -13,6 +17,22 @@ fi
 if [[ ! -f tinycast.env ]]; then
   echo "缺少 tinycast.env，请确认压缩包已完整解压。" >&2
   exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "缺少 curl，无法探测 MediaMTX 是否就绪；请先安装 curl。" >&2
+  exit 1
+fi
+
+# MediaMTX 默认监听 1935（特权端口）。普通用户需要 root 授权或放宽
+# net.ipv4.ip_unprivileged_port_start，否则 MediaMTX 会因 EACCES 直接退出。
+if [[ "$(id -u)" -ne 0 ]]; then
+  threshold=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
+  if [[ "$threshold" =~ ^[0-9]+$ ]] && (( threshold > 1935 )); then
+    echo "[WARN] 当前用户无法绑定 1935 端口：请用 sudo 运行，或执行" >&2
+    echo "       sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024（写入 /etc/sysctl.conf 可持久化）。" >&2
+    echo "       也可以改用 systemd 单元（已带 CAP_NET_BIND_SERVICE）。" >&2
+  fi
 fi
 
 mkdir -p logs

@@ -21,12 +21,15 @@ source scripts/release-env.sh
 
 export DIST="${DIST:-dist}"
 mkdir -p "$DIST"
-rm -f "$DIST"/SHA256SUMS
+# 只清理上一轮的发布包，避免历史产物混进本次 SHA256SUMS。
+rm -f "$DIST"/SHA256SUMS "$DIST"/tinycast-*-linux-*.tar.gz "$DIST"/tinycast-*-windows-*.zip
 
 echo "==> 发布版本 $VERSION（commit $COMMIT，构建于 $BUILD_TIME）"
 ./scripts/package-linux.sh
 ./scripts/package-windows.sh
 
 echo "==> 生成校验和"
-( cd "$DIST" && sha256sum ./* > SHA256SUMS )
+LINUX_PKG="tinycast-${VERSION}-linux-${GOARCH:-amd64}.tar.gz"
+WINDOWS_PKG="tinycast-${VERSION}-windows-amd64.zip"
+( cd "$DIST" && sha256sum "$LINUX_PKG" "$WINDOWS_PKG" > SHA256SUMS )
 cat "$DIST/SHA256SUMS"

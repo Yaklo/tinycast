@@ -3,6 +3,9 @@
 .tools
 .github
 bin
+dist
+*.tar.gz
+*.zip
 node_modules
 web/node_modules
 web/dist

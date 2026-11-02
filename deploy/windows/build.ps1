@@ -25,6 +25,12 @@ if (-not (Test-Path 'internal\webui\dist\.gitkeep')) {
 Write-Host '==> 构建后端'
 New-Item -ItemType Directory -Force -Path 'bin' | Out-Null
 $env:CGO_ENABLED = '0'
-go build -trimpath -ldflags '-s -w' -o bin\tinycast.exe ./cmd/tinycast
+$version = if ($env:TINYCAST_VERSION) { $env:TINYCAST_VERSION } else { 'devel' }
+$commit = if ($env:TINYCAST_COMMIT) { $env:TINYCAST_COMMIT } else {
+    try { (git rev-parse --short HEAD).Trim() } catch { '' }
+}
+$buildTime = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+$ldflags = "-s -w -X tinycast/internal/version.Version=$version -X tinycast/internal/version.Commit=$commit -X tinycast/internal/version.BuildTime=$buildTime"
+go build -trimpath -ldflags $ldflags -o bin\tinycast.exe ./cmd/tinycast
 
 Write-Host "==> 完成：$root\bin\tinycast.exe"

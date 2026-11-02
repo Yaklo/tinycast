@@ -17,6 +17,14 @@ if not exist "mediamtx\mediamtx.yml" (
 )
 if not exist "logs" mkdir "logs"
 
+where curl.exe >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] curl.exe not found. Windows 10 1803 or newer includes it.
+  echo         Use a newer Windows, or install curl and add it to PATH.
+  pause
+  exit /b 1
+)
+
 rem Rotate mediamtx.log at 16 MB, keep three older files.
 if exist "logs\mediamtx.log" (
   for %%F in ("logs\mediamtx.log") do if %%~zF GTR 16777216 (
